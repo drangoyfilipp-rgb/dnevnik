@@ -83,6 +83,7 @@ class _RootGateState extends State<RootGate> with WidgetsBindingObserver {
     if (state == AppLifecycleState.paused || state == AppLifecycleState.hidden) {
       _pausedAt ??= DateTime.now();
     } else if (state == AppLifecycleState.resumed) {
+      s.repo.onResume();
       final p = _pausedAt;
       _pausedAt = null;
       if (p != null &&

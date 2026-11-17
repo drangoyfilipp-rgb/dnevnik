@@ -19,19 +19,18 @@ class DiagnosticsScreen extends StatelessWidget {
 
   Future<void> _export(BuildContext context) async {
     final repo = Services.I.repo;
-    // Make sure the main pages are in memory before exporting their structure.
-    if (repo.loggedIn && Diagnostics.instance.pageKinds.length < 3) {
-      await repo.loadWeek(0, force: true);
-      await repo.loadGrades();
-      await repo.loadFinals();
+    // Make sure there is something to describe before exporting.
+    if (repo.loggedIn && !repo.offline && Diagnostics.instance.shapes.isEmpty) {
+      await repo.refreshAll();
     }
-    final text = Diagnostics.instance.structureExport(appVersion: await _version());
+    final text = Diagnostics.instance.structureExport(
+        appVersion: await _version(), state: repo.stateLine(), store: repo.store.summary());
     final dir = await getTemporaryDirectory();
     final f = File('${dir.path}/dnevnik-diagnostika.txt');
     await f.writeAsString(text);
     await SharePlus.instance.share(ShareParams(
       files: [XFile(f.path, mimeType: 'text/plain')],
-      text: 'Диагностика Дневника (только структура страниц, без оценок и имён)',
+      text: 'Диагностика Дневника (только пути API и структура JSON, без оценок, имён и заданий)',
     ));
   }
 
@@ -45,7 +44,7 @@ class DiagnosticsScreen extends StatelessWidget {
         builder: (context, _) => FutureBuilder<String>(
           future: _version(),
           builder: (context, snap) {
-            final report = d.report(appVersion: snap.data ?? '');
+            final report = d.report(appVersion: snap.data ?? '', state: Services.I.repo.stateLine());
             return ListView(padding: const EdgeInsets.all(16), children: [
               Card(
                 child: ListTile(
@@ -61,13 +60,13 @@ class DiagnosticsScreen extends StatelessWidget {
               FilledButton.icon(
                 onPressed: () => _export(context),
                 icon: const Icon(Icons.ios_share),
-                label: const Text('Экспорт структуры страниц'),
+                label: const Text('Экспорт диагностики'),
               ),
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 6),
                 child: Text(
-                  'В файл попадают только теги, классы и длины текста страниц журнала — без оценок, имён и заданий. '
-                  'Отправьте его, если что-то не отображается.',
+                  'В файл попадают только адреса запросов к API Госуслуг (цифры скрыты) и названия полей JSON с типами — '
+                  'без оценок, имён и заданий. Отправьте его, если что-то не отображается.',
                 ),
               ),
               Row(children: [

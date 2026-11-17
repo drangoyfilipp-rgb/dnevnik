@@ -36,7 +36,7 @@ class FeedTab extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: Text(todayDay?.holiday == true
                 ? (todayDay!.holidayText.isEmpty ? 'Выходной' : todayDay.holidayText)
-                : (days.isEmpty ? 'Загружаю дневник…' : 'Уроков нет')),
+                : (days.isEmpty ? (repo.busy ? 'Загружаю дневник…' : 'Данных пока нет — потяните вниз, чтобы обновить') : 'Уроков нет')),
           ));
         } else {
           children.add(Card(
@@ -216,11 +216,15 @@ class _ScheduleTabState extends State<ScheduleTab> {
                 child: ListView(children: [
                   if (week == null)
                     EmptyState(
-                      icon: Icons.cloud_download_outlined,
-                      text: repo.busy ? 'Загружаю…' : 'Неделя ещё не загружена',
+                      icon: repo.offline ? Icons.cloud_off : Icons.cloud_download_outlined,
+                      text: repo.busy
+                          ? 'Загружаю…'
+                          : (repo.offline ? 'Нет сохранённых данных за эту неделю' : 'Данных за эту неделю нет'),
                       action: repo.busy
                           ? const CircularProgressIndicator()
-                          : FilledButton.tonal(onPressed: () => repo.loadWeek(_delta, force: true), child: const Text('Загрузить')),
+                          : (repo.offline
+                              ? null
+                              : FilledButton.tonal(onPressed: () => repo.loadWeek(_delta, force: true), child: const Text('Обновить'))),
                     )
                   else if (day == null || day.lessons.isEmpty)
                     EmptyState(
@@ -338,8 +342,10 @@ class _HomeworkTabState extends State<HomeworkTab> {
                 child: ListView(children: [
                   if (week == null)
                     EmptyState(
-                      icon: Icons.cloud_download_outlined,
-                      text: repo.busy ? 'Загружаю…' : 'Неделя ещё не загружена',
+                      icon: repo.offline ? Icons.cloud_off : Icons.cloud_download_outlined,
+                      text: repo.busy
+                          ? 'Загружаю…'
+                          : (repo.offline ? 'Нет сохранённых данных за эту неделю' : 'Данных за эту неделю нет'),
                     )
                   else if (items.isEmpty)
                     const EmptyState(icon: Icons.task_alt, text: 'Заданий нет'),
@@ -458,8 +464,8 @@ class _GradesTabState extends State<GradesTab> {
     if (subjects.isEmpty) {
       children.add(EmptyState(
         icon: Icons.grade_outlined,
-        text: repo.busy ? 'Загружаю оценки…' : 'Оценок пока нет. Если в официальном приложении они есть — откройте «Ещё → Диагностика».',
-        action: repo.busy ? null : FilledButton.tonal(onPressed: () => repo.loadGrades(), child: const Text('Обновить')),
+        text: repo.busy ? 'Загружаю оценки…' : 'Оценок пока нет. Если в официальном приложении они есть — отправьте «Ещё → Диагностика → Экспорт».',
+        action: repo.busy || repo.offline ? null : FilledButton.tonal(onPressed: () => repo.loadWeek(0, force: true), child: const Text('Обновить')),
       ));
     } else if (settings.gradesByDate) {
       final all = subjects.expand((s) => s.marks).toList()
@@ -495,7 +501,7 @@ class _GradesTabState extends State<GradesTab> {
     }
     children.add(const SizedBox(height: 24));
     return RefreshIndicator(
-      onRefresh: () => repo.loadGrades(),
+      onRefresh: repo.refreshAll,
       child: SelectionArea(child: ListView(children: children)),
     );
   }
@@ -505,18 +511,18 @@ class _GradesTabState extends State<GradesTab> {
     final t = Theme.of(context).textTheme;
     if (f == null || f.rows.isEmpty) {
       return RefreshIndicator(
-        onRefresh: repo.loadFinals,
+        onRefresh: repo.refreshAll,
         child: ListView(children: [
           EmptyState(
             icon: Icons.emoji_events_outlined,
             text: repo.busy ? 'Загружаю…' : 'Итоговых оценок пока нет',
-            action: repo.busy ? null : FilledButton.tonal(onPressed: repo.loadFinals, child: const Text('Обновить')),
+            action: repo.busy || repo.offline ? null : FilledButton.tonal(onPressed: repo.refreshAll, child: const Text('Обновить')),
           ),
         ]),
       );
     }
     return RefreshIndicator(
-      onRefresh: repo.loadFinals,
+      onRefresh: repo.refreshAll,
       child: SelectionArea(
         child: ListView(padding: const EdgeInsets.symmetric(vertical: 8), children: [
           for (final r in f.rows)

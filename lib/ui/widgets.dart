@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../core/models.dart';
 import '../core/share_format.dart';
+import '../core/util.dart';
 import '../services.dart';
 import 'file_actions.dart';
 import 'login_screen.dart';
@@ -276,7 +277,7 @@ class EmptyState extends StatelessWidget {
   }
 }
 
-/// Session/offline banner shown on top of the tabs.
+/// Offline / session banner shown on top of the tabs. Never blocks the cached data.
 class StatusBanner extends StatelessWidget {
   const StatusBanner({super.key});
   @override
@@ -286,10 +287,28 @@ class StatusBanner extends StatelessWidget {
       listenable: repo,
       builder: (context, _) {
         final c = Theme.of(context).colorScheme;
+        final t = Theme.of(context).textTheme;
+        final updated = repo.lastSync == null ? 'нет данных' : 'обновлено ${ddmmhhmm(repo.lastSync!)}';
+        if (repo.offline) {
+          return Material(
+            color: c.surfaceContainerHighest,
+            child: InkWell(
+              onTap: repo.refreshAll,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                child: Row(children: [
+                  Icon(Icons.cloud_off, size: 16, color: c.onSurfaceVariant),
+                  const SizedBox(width: 8),
+                  Expanded(child: Text('Офлайн · $updated', style: t.bodySmall)),
+                ]),
+              ),
+            ),
+          );
+        }
         if (repo.sessionExpired) {
           return MaterialBanner(
             backgroundColor: c.errorContainer,
-            content: const Text('Сессия школы истекла. Показаны сохранённые данные.'),
+            content: Text('Сессия Госуслуг истекла. Показаны сохранённые данные ($updated).'),
             actions: [
               TextButton(
                 onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const LoginWebView())),
@@ -301,7 +320,7 @@ class StatusBanner extends StatelessWidget {
         if (repo.lastError != null) {
           return MaterialBanner(
             backgroundColor: c.surfaceContainerHighest,
-            content: Text('${repo.lastError}${repo.lastSync == null ? '' : '\nОбновлено ${timeAgo(repo.lastSync!)}'}'),
+            content: Text('${repo.lastError}\nПоказаны сохранённые данные ($updated).', style: t.bodySmall),
             actions: [TextButton(onPressed: repo.refreshAll, child: const Text('Повторить'))],
           );
         }

@@ -1,6 +1,6 @@
 import 'package:flutter/foundation.dart';
 
-import 'parser.dart';
+import 'myschool.dart';
 
 class LogEntry {
   final DateTime time;
@@ -13,11 +13,24 @@ class LogEntry {
 String _hms(DateTime t) =>
     '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}:${t.second.toString().padLeft(2, '0')}';
 
-/// Masks digits in paths so ids do not leave the device.
+/// Masks digits/uuids in paths so ids do not leave the device (host kept, query dropped).
 String maskPath(String urlOrPath) {
   final uri = Uri.tryParse(urlOrPath);
-  final p = uri == null ? urlOrPath : (uri.host.isEmpty ? uri.path : '${uri.host}${uri.path}');
-  return p.replaceAll(RegExp(r'\d{3,}'), '#');
+  final host = uri == null || uri.host.isEmpty ? '' : uri.host;
+  return '$host${maskApiPath(urlOrPath)}';
+}
+
+/// One API call seen (by the app or inside the WebView): path + key structure, no values.
+class ApiShape {
+  ApiShape(this.method, this.path, this.status, this.request, this.response, this.via, this.headerNames);
+  final String method;
+  final String path;
+  final int status;
+  final String request;
+  final String response;
+  final String via;
+  final List<String> headerNames;
+  final DateTime at = DateTime.now();
 }
 
 class Diagnostics extends ChangeNotifier {
@@ -27,15 +40,16 @@ class Diagnostics extends ChangeNotifier {
   final List<LogEntry> log = [];
   String? lastError;
   DateTime? lastErrorAt;
-  String? certWarning;
-  bool devkeySeen = false;
 
-  /// Last raw page per kind (memory only, never written to disk).
-  final Map<String, String> _pages = {};
+  /// Latest shape per «METHOD path [obj_types]» (memory only).
+  final Map<String, ApiShape> shapes = {};
+
+  /// Masked /school/* pages visited by the WebView (to know the web app's routes).
+  final Set<String> webPages = {};
 
   void add(String text) {
     log.add(LogEntry(text));
-    if (log.length > 200) log.removeRange(0, log.length - 200);
+    if (log.length > 300) log.removeRange(0, log.length - 300);
     notifyListeners();
   }
 
@@ -45,37 +59,54 @@ class Diagnostics extends ChangeNotifier {
     add('ОШИБКА $where: $e');
   }
 
-  void page(String kind, String source) {
-    _pages[kind] = source;
-    if (pageMentionsDevkey(source)) devkeySeen = true;
+  void api(String method, String url, int status, dynamic request, dynamic response,
+      {String via = 'app', Iterable<String> headerNames = const []}) {
+    final path = maskApiPath(url);
+    final types = DatamartStore.itemsIn(request).map((i) => '${i['obj_type']}').toSet().toList()..sort();
+    final key = '$via $method $path ${types.join(',')}';
+    shapes[key] = ApiShape(
+      method,
+      path,
+      status,
+      request == null ? '' : shapeText(request),
+      response == null ? '' : shapeText(response),
+      via,
+      headerNames.map((h) => h.toLowerCase()).toSet().toList()..sort(),
+    );
+    if (shapes.length > 60) shapes.remove(shapes.keys.first);
+    notifyListeners();
   }
 
-  List<String> get pageKinds => _pages.keys.toList();
-
-  String report({String appVersion = ''}) {
+  String report({String appVersion = '', String state = ''}) {
     final b = StringBuffer('Дневник — диагностика\n');
     if (appVersion.isNotEmpty) b.writeln('Версия: $appVersion');
     b.writeln('Время: ${DateTime.now().toIso8601String()}');
     b.writeln('Последняя ошибка: ${lastError ?? 'нет'}${lastErrorAt == null ? '' : ' (${lastErrorAt!.toIso8601String()})'}');
-    if (certWarning != null) b.writeln('Сертификат: $certWarning');
-    b.writeln('devkey на страницах: ${devkeySeen ? 'встречается' : 'нет'}');
+    if (state.isNotEmpty) b.writeln(state);
     b.writeln('\nЖурнал:');
-    for (final e in log.reversed.take(80)) {
+    for (final e in log.reversed.take(120)) {
       b.writeln(e.toString());
     }
     return b.toString();
   }
 
-  /// Structure of the last fetched pages without personal text.
-  String structureExport({String appVersion = ''}) {
-    final b = StringBuffer(report(appVersion: appVersion));
-    if (_pages.isEmpty) {
-      b.writeln('\n(страницы ещё не загружались)');
+  /// Report + API paths with JSON key structure (types only, no values).
+  String structureExport({String appVersion = '', String state = '', String store = ''}) {
+    final b = StringBuffer(report(appVersion: appVersion, state: state));
+    b.writeln('\n===== ДАННЫЕ (только счётчики) =====');
+    b.writeln(store.isEmpty ? '(нет)' : store);
+    b.writeln('\n===== СТРАНИЦЫ WEBVIEW =====');
+    b.writeln(webPages.isEmpty ? '(нет)' : webPages.join('\n'));
+    b.writeln('\n===== API: пути и структура JSON (без значений) =====');
+    if (shapes.isEmpty) b.writeln('(запросов к /api/myschool/ ещё не было)');
+    for (final s in shapes.values) {
+      b.writeln('\n--- [${s.via}] ${s.method} ${s.path} → ${s.status}');
+      if (s.headerNames.isNotEmpty) b.writeln('заголовки запроса: ${s.headerNames.join(', ')}');
+      if (s.request.isNotEmpty) b.writeln('ЗАПРОС:\n${s.request}');
+      if (s.response.isNotEmpty) b.writeln('ОТВЕТ:\n${_cap(s.response)}');
     }
-    _pages.forEach((kind, src) {
-      b.writeln('\n===== СТРАНИЦА: $kind (${src.length} байт) =====');
-      b.writeln(sanitizedStructure(src));
-    });
     return b.toString();
   }
+
+  String _cap(String s) => s.length > 30000 ? '${s.substring(0, 30000)}\n…(обрезано)' : s;
 }

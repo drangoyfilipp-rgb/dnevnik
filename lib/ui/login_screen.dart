@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
+import '../core/bridge.dart';
 import '../core/diagnostics.dart';
-import '../core/parser.dart';
+import '../core/myschool.dart';
 import '../services.dart';
 import 'diagnostics_screen.dart';
 
@@ -25,8 +28,8 @@ class LoginIntro extends StatelessWidget {
             const SizedBox(height: 8),
             Text(
               repo.sessionExpired
-                  ? 'Сессия школы закончилась. Войдите снова — сохранённые данные никуда не делись.'
-                  : 'Расписание, задания и оценки из электронного журнала школы (school.lpr-reg.ru).',
+                  ? 'Сессия Госуслуг закончилась. Войдите снова — сохранённые данные никуда не делись.'
+                  : 'Расписание, задания и оценки из «Госуслуги Моя школа».',
               textAlign: TextAlign.center,
             ),
             const Spacer(),
@@ -37,8 +40,8 @@ class LoginIntro extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             Text(
-              'Логин и пароль вводятся на официальной странице Госуслуг. Приложение их не видит и не сохраняет — '
-              'хранится только сессия школы на этом телефоне.',
+              'Вход идёт на официальной странице Госуслуг (gosuslugi.ru/school). Приложение не видит и не сохраняет '
+              'пароль — на этом телефоне хранится только сессия.',
               style: t.bodySmall,
               textAlign: TextAlign.center,
             ),
@@ -53,8 +56,11 @@ class LoginIntro extends StatelessWidget {
   }
 }
 
+/// Official www.gosuslugi.ru/school web app in a WebView with the API bridge.
+/// [browse] = «Дневник Госуслуг» from «Ещё»: no auto-close, data is captured while browsing.
 class LoginWebView extends StatefulWidget {
-  const LoginWebView({super.key});
+  const LoginWebView({super.key, this.browse = false});
+  final bool browse;
   @override
   State<LoginWebView> createState() => _LoginWebViewState();
 }
@@ -62,76 +68,145 @@ class LoginWebView extends StatefulWidget {
 class _LoginWebViewState extends State<LoginWebView> {
   double _progress = 0;
   String _host = '';
-  bool _finishing = false;
+  bool _signedIn = false;
+  bool _closing = false;
+  int _datamart = 0;
+  InAppWebViewController? _c;
+  StreamSubscription<WebCapture>? _sub;
+  Timer? _hintTimer;
+  bool _showHint = false;
 
-  static bool isFinalSchoolPage(Uri u) {
-    if (!u.host.endsWith('lpr-reg.ru')) return false;
-    final p = u.path;
-    if (p.startsWith('/authorize') || p.startsWith('/journal-esia') || p.startsWith('/esia-redirect')) return false;
-    return p == '/' || p.isEmpty || p.startsWith('/journal-');
+  @override
+  void initState() {
+    super.initState();
+    _sub = Bridge.events.listen((cap) {
+      if (cap.isDatamart && cap.status >= 200 && cap.status < 300) {
+        _datamart++;
+        if (mounted) setState(() {});
+        if (_signedIn && !widget.browse) {
+          // Give the web app a moment to load the rest of its data, then return.
+          Timer(const Duration(seconds: 3), _finish);
+        }
+      }
+    });
   }
 
-  Future<void> _maybeFinish(InAppWebViewController c, WebUri? url) async {
-    if (url == null || _finishing) return;
+  @override
+  void dispose() {
+    _sub?.cancel();
+    _hintTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _check(InAppWebViewController c, WebUri? url) async {
+    Bridge.notePage(url);
+    if (url == null) return;
     final u = Uri.parse(url.toString());
-    Diagnostics.instance.add('Вход: ${maskPath(u.toString())}');
-    if (!isFinalSchoolPage(u)) return;
-    _finishing = true;
-    try {
-      final cookies = await CookieManager.instance().getCookies(url: WebUri(kBaseUrl));
-      final map = <String, String>{for (final ck in cookies) ck.name: '${ck.value}'};
-      final ua = await c.evaluateJavascript(source: 'navigator.userAgent');
-      if (map.isEmpty) {
-        Diagnostics.instance.error('вход', 'после входа нет cookies школы');
-        _finishing = false;
-        return;
-      }
-      await Services.I.repo.saveSession(map, ua is String ? ua : null);
-      if (!mounted) return;
-      Navigator.of(context).popUntil((r) => r.isFirst);
-      Services.I.repo.refreshAll();
-    } catch (e) {
-      Diagnostics.instance.error('вход', e);
-      _finishing = false;
+    Diagnostics.instance.add('WebView: ${maskPath(u.toString())}');
+    if (_signedIn || !Bridge.isSchoolPage(u)) return;
+    final cookies = await Bridge.portalCookies();
+    if ((cookies['acc_t'] ?? '').isEmpty) return;
+    _signedIn = true;
+    await Services.I.repo.saveSession(cookies, await Bridge.userAgent(c));
+    if (!mounted) return;
+    setState(() {});
+    if (!widget.browse) {
+      _hintTimer = Timer(const Duration(seconds: 12), () {
+        if (mounted) setState(() => _showHint = true);
+      });
     }
+  }
+
+  Future<void> _finish() async {
+    if (_closing || !mounted) return;
+    _closing = true;
+    final cookies = await Bridge.portalCookies();
+    final c = _c;
+    if ((cookies['acc_t'] ?? '').isNotEmpty) {
+      await Services.I.repo.saveSession(cookies, c == null ? null : await Bridge.userAgent(c));
+    }
+    if (!mounted) return;
+    if (widget.browse) {
+      Navigator.of(context).pop();
+    } else {
+      Navigator.of(context).popUntil((r) => r.isFirst);
+    }
+    Services.I.repo.refreshAll();
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(_host.isEmpty ? 'Вход' : _host, style: const TextStyle(fontSize: 16)),
-        bottom: _progress < 1
-            ? PreferredSize(
-                preferredSize: const Size.fromHeight(3), child: LinearProgressIndicator(value: _progress == 0 ? null : _progress))
-            : null,
-      ),
-      body: InAppWebView(
-        initialUrlRequest: URLRequest(url: WebUri('$kBaseUrl/journal-esia-action/')),
-        initialSettings: InAppWebViewSettings(
-          javaScriptEnabled: true,
-          domStorageEnabled: true,
-          thirdPartyCookiesEnabled: true,
-          saveFormData: false,
-          clearCache: false,
-          supportZoom: true,
-        ),
-        onProgressChanged: (c, p) => setState(() => _progress = p / 100),
-        onLoadStart: (c, url) => setState(() => _host = url?.host ?? ''),
-        onLoadStop: _maybeFinish,
-        onUpdateVisitedHistory: (c, url, reload) => _maybeFinish(c, url),
-        onReceivedServerTrustAuthRequest: (c, challenge) async {
-          final host = challenge.protectionSpace.host;
-          final ok = Services.I.settings.trustSchoolCert && (host == 'lpr-reg.ru' || host.endsWith('.lpr-reg.ru'));
-          Diagnostics.instance.certWarning = 'WebView: ошибка сертификата у $host, ${ok ? 'разрешено' : 'отклонено'}';
-          return ServerTrustAuthResponse(
-              action: ok ? ServerTrustAuthResponseAction.PROCEED : ServerTrustAuthResponseAction.CANCEL);
-        },
-        onReceivedError: (c, req, err) {
-          if (req.isForMainFrame ?? true) {
-            Diagnostics.instance.error('вход WebView', '${err.type} ${err.description} (${maskPath(req.url.toString())})');
+    final t = Theme.of(context).textTheme;
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop) return;
+        final c = _c;
+        if (c != null && await c.canGoBack()) {
+          await c.goBack();
+        } else if (context.mounted) {
+          if (_signedIn) {
+            _finish();
+          } else {
+            Navigator.of(context).pop();
           }
-        },
+        }
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(widget.browse ? 'Дневник Госуслуг' : (_host.isEmpty ? 'Вход' : _host), style: const TextStyle(fontSize: 16)),
+          actions: [
+            if (_signedIn || widget.browse) TextButton(onPressed: _finish, child: const Text('Готово')),
+          ],
+          bottom: _progress < 1
+              ? PreferredSize(
+                  preferredSize: const Size.fromHeight(3),
+                  child: LinearProgressIndicator(value: _progress == 0 ? null : _progress))
+              : null,
+        ),
+        body: Column(children: [
+          if (_signedIn && !widget.browse)
+            Material(
+              color: Theme.of(context).colorScheme.secondaryContainer,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                child: Text(
+                  _showHint && _datamart == 0
+                      ? 'Если Госуслуги просят выбрать регион или дать согласие — пройдите шаги и откройте дневник, затем нажмите «Готово».'
+                      : 'Вход выполнен — загружаю дневник…',
+                  style: t.bodySmall,
+                ),
+              ),
+            ),
+          Expanded(
+            child: InAppWebView(
+              initialUrlRequest: URLRequest(url: WebUri(kMsFeedUrl)),
+              initialUserScripts: bridgeScripts(),
+              initialSettings: InAppWebViewSettings(
+                javaScriptEnabled: true,
+                domStorageEnabled: true,
+                databaseEnabled: true,
+                thirdPartyCookiesEnabled: true,
+                saveFormData: false,
+                cacheEnabled: true,
+                supportZoom: true,
+              ),
+              onWebViewCreated: (c) {
+                _c = c;
+                Bridge.attach(c);
+              },
+              onProgressChanged: (c, p) => setState(() => _progress = p / 100),
+              onLoadStart: (c, url) => setState(() => _host = url?.host ?? ''),
+              onLoadStop: _check,
+              onUpdateVisitedHistory: (c, url, reload) => _check(c, url),
+              onReceivedError: (c, req, err) {
+                if (req.isForMainFrame ?? true) {
+                  Diagnostics.instance.error('WebView', '${err.type} ${err.description} (${maskPath(req.url.toString())})');
+                }
+              },
+            ),
+          ),
+        ]),
       ),
     );
   }

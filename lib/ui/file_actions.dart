@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../core/diagnostics.dart';
 import '../core/models.dart';
@@ -51,19 +52,34 @@ class FileActions {
       if (have != null) return have;
     }
     progress.value = {...progress.value, a.url: 0};
+    final repo = Services.I.repo;
     try {
-      final dir = await Services.I.repo.filesDir();
-      final f = await Services.I.repo.client.download(a.url, dir, fallbackName: a.name, onProgress: (got, total) {
-        progress.value = {...progress.value, a.url: total == null ? -1 : got / total};
-      });
+      final dir = await repo.filesDir();
+      Future<File> go() => repo.client.download(a.url, dir, fallbackName: a.name, onProgress: (got, total) {
+            progress.value = {...progress.value, a.url: total == null ? -1 : got / total};
+          });
+      File f;
+      try {
+        f = await go();
+      } on SessionExpired {
+        if (!await repo.reloginSilently()) rethrow;
+        f = await go();
+      }
       await FileIndex.put(a.url, f.path);
       return f;
     } on SessionExpired {
-      Services.I.repo.markSessionExpired();
-      messenger?.showSnackBar(const SnackBar(content: Text('Сессия истекла — войдите снова, чтобы скачать файл')));
+      repo.markSessionExpired();
+      messenger?.showSnackBar(const SnackBar(content: Text('Сессия Госуслуг истекла — войдите снова, чтобы скачать файл')));
+    } on NotJson {
+      // A web page rather than a file (e.g. a link to an online resource): open it in the browser.
+      await launchUrl(Uri.parse(a.url), mode: LaunchMode.externalApplication);
     } catch (e) {
-      Diagnostics.instance.error('файл', e);
-      messenger?.showSnackBar(SnackBar(content: Text('Не удалось скачать «${a.name}»: $e')));
+      if (isOfflineError(e)) {
+        messenger?.showSnackBar(SnackBar(content: Text('Нет интернета: «${a.name}» ещё не скачан')));
+      } else {
+        Diagnostics.instance.error('файл', e);
+        messenger?.showSnackBar(SnackBar(content: Text('Не удалось скачать «${a.name}»: $e')));
+      }
     } finally {
       progress.value = Map.of(progress.value)..remove(a.url);
     }
@@ -151,5 +167,65 @@ class AttachmentRow extends StatelessWidget {
           child: AttachmentChip(file: f),
         ),
     ]);
+  }
+}
+
+/// Files downloaded earlier (they live in the app's folder and open offline).
+class DownloadedFilesScreen extends StatefulWidget {
+  const DownloadedFilesScreen({super.key});
+  @override
+  State<DownloadedFilesScreen> createState() => _DownloadedFilesScreenState();
+}
+
+class _DownloadedFilesScreenState extends State<DownloadedFilesScreen> {
+  late Future<List<File>> _files = _list();
+
+  Future<List<File>> _list() async {
+    final dir = await Services.I.repo.filesDir();
+    if (!await dir.exists()) return [];
+    final list = await dir.list().where((e) => e is File && !e.path.split('/').last.startsWith('.')).cast<File>().toList();
+    list.sort((a, b) => b.statSync().modified.compareTo(a.statSync().modified));
+    return list;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Скачанные файлы')),
+      body: FutureBuilder<List<File>>(
+        future: _files,
+        builder: (context, snap) {
+          final files = snap.data ?? const <File>[];
+          if (snap.connectionState != ConnectionState.done) return const Center(child: CircularProgressIndicator());
+          if (files.isEmpty) {
+            return const Center(child: Padding(padding: EdgeInsets.all(32), child: Text('Пока ничего не скачано')));
+          }
+          return ListView(children: [
+            for (final f in files)
+              ListTile(
+                leading: Icon(fileIcon(f.path)),
+                title: Text(f.path.split('/').last),
+                subtitle: Text('${(f.lengthSync() / 1024).ceil()} КБ'),
+                onTap: () => OpenFilex.open(f.path),
+                trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                  IconButton(
+                    tooltip: 'Поделиться',
+                    icon: const Icon(Icons.share_outlined),
+                    onPressed: () => SharePlus.instance.share(ShareParams(files: [XFile(f.path)])),
+                  ),
+                  IconButton(
+                    tooltip: 'Удалить',
+                    icon: const Icon(Icons.delete_outline),
+                    onPressed: () async {
+                      await f.delete();
+                      setState(() => _files = _list());
+                    },
+                  ),
+                ]),
+              ),
+          ]);
+        },
+      ),
+    );
   }
 }

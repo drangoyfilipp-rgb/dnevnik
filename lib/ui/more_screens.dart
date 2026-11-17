@@ -6,6 +6,7 @@ import '../core/settings.dart';
 import '../core/updater.dart';
 import '../services.dart';
 import 'diagnostics_screen.dart';
+import 'file_actions.dart';
 import 'lock_screens.dart';
 import 'login_screen.dart';
 import 'update_dialog.dart';
@@ -30,6 +31,18 @@ class MoreTab extends StatelessWidget {
         onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const DiagnosticsScreen())),
       ),
       ListTile(
+        leading: const Icon(Icons.public),
+        title: const Text('Дневник Госуслуг'),
+        subtitle: const Text('Официальная веб-версия; данные с открытых страниц тоже сохраняются'),
+        onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const LoginWebView(browse: true))),
+      ),
+      ListTile(
+        leading: const Icon(Icons.folder_outlined),
+        title: const Text('Скачанные файлы'),
+        subtitle: const Text('Открываются и без интернета'),
+        onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const DownloadedFilesScreen())),
+      ),
+      ListTile(
         leading: const Icon(Icons.info_outline),
         title: const Text('О приложении и обновления'),
         onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AboutScreen())),
@@ -38,7 +51,7 @@ class MoreTab extends StatelessWidget {
       ListTile(
         leading: const Icon(Icons.login),
         title: const Text('Войти заново'),
-        subtitle: const Text('Если сессия школы истекла'),
+        subtitle: const Text('Если сессия Госуслуг истекла'),
         onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const LoginWebView())),
       ),
       ListTile(
@@ -215,13 +228,6 @@ class SettingsScreen extends StatelessWidget {
               value: s.autoUpdate,
               onChanged: (v) => s.update((x) => x.autoUpdate = v),
             ),
-            header('Соединение'),
-            SwitchListTile(
-              title: const Text('Доверять сертификату школы при ошибке'),
-              subtitle: const Text('Только для school.lpr-reg.ru: у сайта бывает просроченный сертификат'),
-              value: s.trustSchoolCert,
-              onChanged: (v) => s.update((x) => x.trustSchoolCert = v),
-            ),
             const SizedBox(height: 32),
           ]);
         },
@@ -271,8 +277,8 @@ class _AboutScreenState extends State<AboutScreen> {
           Text('Дневник', style: Theme.of(context).textTheme.headlineSmall),
           Text(snap.hasData ? 'Сборка ${snap.data!.buildNumber} (${snap.data!.version})' : ''),
           const SizedBox(height: 12),
-          const Text('Личное приложение для электронного журнала school.lpr-reg.ru. Без рекламы и аналитики; '
-              'данные хранятся только на этом телефоне. Пароль от Госуслуг не сохраняется.'),
+          const Text('Личное приложение для дневника «Госуслуги Моя школа». Без рекламы и аналитики; '
+              'данные хранятся только на этом телефоне и доступны без интернета. Пароль от Госуслуг не сохраняется.'),
           const SizedBox(height: 20),
           FilledButton.icon(
             onPressed: _checking ? null : _check,

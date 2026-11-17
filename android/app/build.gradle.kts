@@ -15,7 +15,8 @@ plugins {
 
 android {
     namespace = "ru.drangoy.dnevnik"
-    compileSdk = flutter.compileSdkVersion
+    // Explicit latest SDK (Android 16) so Play Protect does not warn «создано для более ранней версии Android».
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -30,7 +31,7 @@ android {
     defaultConfig {
         applicationId = "ru.drangoy.dnevnik"
         minSdk = flutter.minSdkVersion
-        targetSdk = flutter.targetSdkVersion
+        targetSdk = 36
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
@@ -43,6 +44,9 @@ android {
                 keyAlias = keyProps.getProperty("keyAlias")
                 keyPassword = keyProps.getProperty("keyPassword")
                 storeType = "pkcs12"
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
             }
         }
     }

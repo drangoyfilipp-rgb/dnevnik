@@ -41,7 +41,6 @@ class AppSettings extends ChangeNotifier {
   bool hwOnlySubjectsWithHw = true;
   bool hwByWeek = false;
   bool gradesByDate = false;
-  bool trustSchoolCert = true;
   int lockAfterSeconds = 60;
 
   Future<void> load() async {
@@ -71,7 +70,6 @@ class AppSettings extends ChangeNotifier {
     hwOnlySubjectsWithHw = _p.getBool('hwOnly') ?? true;
     hwByWeek = _p.getBool('hwByWeek') ?? false;
     gradesByDate = _p.getBool('gradesByDate') ?? false;
-    trustSchoolCert = _p.getBool('trustSchoolCert') ?? true;
     lockAfterSeconds = _p.getInt('lockAfterSeconds') ?? 60;
   }
 
@@ -101,7 +99,6 @@ class AppSettings extends ChangeNotifier {
     await _p.setBool('hwOnly', hwOnlySubjectsWithHw);
     await _p.setBool('hwByWeek', hwByWeek);
     await _p.setBool('gradesByDate', gradesByDate);
-    await _p.setBool('trustSchoolCert', trustSchoolCert);
     await _p.setInt('lockAfterSeconds', lockAfterSeconds);
   }
 }
