@@ -1,0 +1,4 @@
+-dontwarn com.google.android.play.core.**
+-dontwarn javax.annotation.**
+-dontwarn org.conscrypt.**
+-keep class com.pichillilorenzo.flutter_inappwebview_android.** { *; }

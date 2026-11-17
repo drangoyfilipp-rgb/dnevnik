@@ -1,4 +1,3 @@
-import 'package:dynamic_color/dynamic_color.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -7,9 +6,16 @@ import 'ui/home_shell.dart';
 import 'ui/lock_screens.dart';
 import 'ui/login_screen.dart';
 
+/// Wallpaper accent colour (Material You) from the platform, Android 12+.
+Color? systemAccent;
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Services.create();
+  try {
+    final v = await const MethodChannel('dnevnik/system').invokeMethod<int>('accentColor');
+    if (v != null) systemAccent = Color(v);
+  } catch (_) {}
   runApp(const DnevnikApp());
 }
 
@@ -28,11 +34,10 @@ class DnevnikApp extends StatelessWidget {
     final s = Services.I.settings;
     return ListenableBuilder(
       listenable: s,
-      builder: (context, _) => DynamicColorBuilder(builder: (light, dark) {
-        const seed = Color(0xFF3F51B5);
-        final lightScheme = (s.dynamicColor ? light : null) ?? ColorScheme.fromSeed(seedColor: seed);
-        final darkScheme =
-            (s.dynamicColor ? dark : null) ?? ColorScheme.fromSeed(seedColor: seed, brightness: Brightness.dark);
+      builder: (context, _) {
+        final seed = (s.dynamicColor ? systemAccent : null) ?? const Color(0xFF3F51B5);
+        final lightScheme = ColorScheme.fromSeed(seedColor: seed);
+        final darkScheme = ColorScheme.fromSeed(seedColor: seed, brightness: Brightness.dark);
         return MaterialApp(
           title: 'Дневник',
           debugShowCheckedModeBanner: false,
@@ -42,7 +47,7 @@ class DnevnikApp extends StatelessWidget {
           locale: const Locale('ru'),
           home: const RootGate(),
         );
-      }),
+      },
     );
   }
 }
