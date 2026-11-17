@@ -13,6 +13,10 @@ class Services {
 
   static late Services I;
 
+  /// Test hook: services without plugins (no storage is touched until used).
+  static Services forTest(AppSettings settings, Repo repo, LockService lock, Updater updater) =>
+      I = Services._(settings, repo, lock, updater);
+
   static Future<Services> create() async {
     final settings = AppSettings();
     await settings.load();

@@ -162,15 +162,19 @@ class SettingsScreen extends StatelessWidget {
                   ),
               ],
             ),
+            header('Расписание'),
+            ListTile(
+              leading: const Icon(Icons.notifications_none),
+              title: const Text('Расписание звонков'),
+              subtitle: Text(s.bells.isEmpty
+                  ? 'Не задано — показываются только номера уроков (школа не заполнила время на портале)'
+                  : '${s.bells.length} ур.: ${s.bells.first} … ${s.bells.last}'),
+              onTap: () => editBells(context),
+            ),
             header('Задания и оценки'),
             SwitchListTile(
-              title: const Text('Только уроки с заданием'),
-              value: s.hwOnlySubjectsWithHw,
-              onChanged: (v) => s.update((x) => x.hwOnlySubjectsWithHw = v),
-            ),
-            SwitchListTile(
-              title: const Text('Задания: по предметам за неделю'),
-              subtitle: const Text('Выкл — по дням'),
+              title: const Text('Задания: группировать по предметам'),
+              subtitle: const Text('Выкл — по датам'),
               value: s.hwByWeek,
               onChanged: (v) => s.update((x) => x.hwByWeek = v),
             ),
@@ -298,4 +302,46 @@ class _AboutScreenState extends State<AboutScreen> {
       ),
     );
   }
+}
+
+Future<void> editBells(BuildContext context) async {
+  final s = Services.I.settings;
+  final ctrl = TextEditingController(text: s.bells.join('\n'));
+  String? error;
+  await showDialog<void>(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setState) => AlertDialog(
+        title: const Text('Расписание звонков'),
+        content: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('По строке на урок, как в школе, например:\n08:00-08:45\n08:55-09:40\nПустое поле — без времени.'),
+            const SizedBox(height: 12),
+            TextField(
+              controller: ctrl,
+              maxLines: 10,
+              minLines: 4,
+              keyboardType: TextInputType.multiline,
+              decoration: InputDecoration(border: const OutlineInputBorder(), errorText: error),
+            ),
+          ]),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
+          FilledButton(
+            onPressed: () {
+              final parsed = parseBells(ctrl.text);
+              if (parsed == null) {
+                setState(() => error = 'Формат строки: 08:00-08:45');
+                return;
+              }
+              s.update((x) => x.bells = parsed);
+              Navigator.pop(ctx);
+            },
+            child: const Text('Сохранить'),
+          ),
+        ],
+      ),
+    ),
+  );
 }

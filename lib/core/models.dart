@@ -3,11 +3,12 @@
 class Attachment {
   final String name;
   final String url; // absolute
-  const Attachment({required this.name, required this.url});
+  final int size; // bytes, 0 = unknown
+  const Attachment({required this.name, required this.url, this.size = 0});
 
-  Map<String, dynamic> toJson() => {'name': name, 'url': url};
-  factory Attachment.fromJson(Map<String, dynamic> j) =>
-      Attachment(name: j['name'] as String? ?? '', url: j['url'] as String? ?? '');
+  Map<String, dynamic> toJson() => {'name': name, 'url': url, if (size > 0) 'size': size};
+  factory Attachment.fromJson(Map<String, dynamic> j) => Attachment(
+      name: j['name'] as String? ?? '', url: j['url'] as String? ?? '', size: (j['size'] as num?)?.toInt() ?? 0);
 }
 
 class Mark {
@@ -17,6 +18,7 @@ class Mark {
   final String subject;
   final DateTime? date;
   final String kind; // lesson, hometask, comment …
+  final String periodId; // study period (четверть) id from the portal, may be empty
   const Mark({
     required this.value,
     this.weight = 1,
@@ -24,6 +26,7 @@ class Mark {
     this.subject = '',
     this.date,
     this.kind = '',
+    this.periodId = '',
   });
 
   /// Numeric value for averages: «5» → 5, «4/5» → 4.5, «5-» → 5, «Н» → null.
@@ -41,6 +44,7 @@ class Mark {
         's': subject,
         'd': date?.toIso8601String(),
         'k': kind,
+        'p': periodId,
       };
   factory Mark.fromJson(Map<String, dynamic> j) => Mark(
         value: j['v'] as String? ?? '',
@@ -49,6 +53,7 @@ class Mark {
         subject: j['s'] as String? ?? '',
         date: j['d'] == null ? null : DateTime.tryParse(j['d'] as String),
         kind: j['k'] as String? ?? '',
+        periodId: j['p'] as String? ?? '',
       );
 }
 
@@ -60,6 +65,10 @@ class Lesson {
   final String homework;
   final List<Attachment> files;
   final List<Mark> marks;
+  final String room;
+  final String teacher; // «Иванова А. Б.»
+  final String absence; // пропуск (если отмечен)
+  final bool isLesson; // false = homework without a lesson in the schedule
   const Lesson({
     this.number = '',
     this.time = '',
@@ -68,7 +77,25 @@ class Lesson {
     this.homework = '',
     this.files = const [],
     this.marks = const [],
+    this.room = '',
+    this.teacher = '',
+    this.absence = '',
+    this.isLesson = true,
   });
+
+  Lesson copyWith({String? number, String? time, String? homework, List<Attachment>? files, List<Mark>? marks}) => Lesson(
+        number: number ?? this.number,
+        time: time ?? this.time,
+        subject: subject,
+        topic: topic,
+        homework: homework ?? this.homework,
+        files: files ?? this.files,
+        marks: marks ?? this.marks,
+        room: room,
+        teacher: teacher,
+        absence: absence,
+        isLesson: isLesson,
+      );
 
   bool get hasHomework => homework.trim().isNotEmpty || files.isNotEmpty;
 
@@ -80,6 +107,10 @@ class Lesson {
         'h': homework,
         'f': files.map((e) => e.toJson()).toList(),
         'm': marks.map((e) => e.toJson()).toList(),
+        'r': room,
+        'tc': teacher,
+        'ab': absence,
+        'il': isLesson,
       };
   factory Lesson.fromJson(Map<String, dynamic> j) => Lesson(
         number: j['n'] as String? ?? '',
@@ -93,6 +124,10 @@ class Lesson {
         marks: ((j['m'] as List?) ?? const [])
             .map((e) => Mark.fromJson(Map<String, dynamic>.from(e as Map)))
             .toList(),
+        room: j['r'] as String? ?? '',
+        teacher: j['tc'] as String? ?? '',
+        absence: j['ab'] as String? ?? '',
+        isLesson: j['il'] as bool? ?? true,
       );
 }
 
@@ -220,24 +255,49 @@ class FinalsTable {
   final List<String> headers; // without the subject column
   final List<FinalsRow> rows;
   final DateTime fetchedAt;
-  const FinalsTable({required this.headers, required this.rows, required this.fetchedAt});
+  final bool forecast; // true = computed from current marks (no official final marks yet)
+  const FinalsTable({required this.headers, required this.rows, required this.fetchedAt, this.forecast = false});
   Map<String, dynamic> toJson() => {
         'h': headers,
-        'r': rows.map((e) => {'s': e.subject, 'v': e.values}).toList(),
+        'r': rows.map((e) => {'s': e.subject, 'v': e.values, 'n': e.notes}).toList(),
         'f': fetchedAt.toIso8601String(),
+        'fc': forecast,
       };
   factory FinalsTable.fromJson(Map<String, dynamic> j) => FinalsTable(
         headers: ((j['h'] as List?) ?? const []).map((e) => '$e').toList(),
         rows: ((j['r'] as List?) ?? const []).map((e) {
           final m = Map<String, dynamic>.from(e as Map);
-          return FinalsRow(m['s'] as String? ?? '', ((m['v'] as List?) ?? const []).map((x) => '$x').toList());
+          return FinalsRow(m['s'] as String? ?? '', ((m['v'] as List?) ?? const []).map((x) => '$x').toList(),
+              ((m['n'] as List?) ?? const []).map((x) => '$x').toList());
         }).toList(),
         fetchedAt: DateTime.tryParse(j['f'] as String? ?? '') ?? DateTime.now(),
+        forecast: j['fc'] as bool? ?? false,
       );
 }
 
 class FinalsRow {
   final String subject;
   final List<String> values;
-  const FinalsRow(this.subject, this.values);
+  final List<String> notes; // e.g. the average a forecast is based on
+  const FinalsRow(this.subject, this.values, [this.notes = const []]);
+}
+
+/// A study period (четверть / полугодие / год) from student_classes.
+class StudyPeriod {
+  final String id;
+  final String label; // «2 четверть»
+  final DateTime start;
+  final DateTime end;
+  final String type; // period_type_code
+  final bool study;
+  const StudyPeriod({
+    required this.id,
+    required this.label,
+    required this.start,
+    required this.end,
+    this.type = '',
+    this.study = true,
+  });
+  bool contains(DateTime d) => !d.isBefore(start) && !d.isAfter(end);
+  int get days => end.difference(start).inDays + 1;
 }

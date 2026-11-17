@@ -1,0 +1,143 @@
+// Synthetic datamart objects in the real portal structure (values are made up).
+
+const sid = 'stud-0001';
+
+Map<String, dynamic> lesson(String id, String date, String subject,
+        {String start = '08:30:00', String end = '09:15:00', String? room, String? skip}) =>
+    {
+      'id': id,
+      'student_id': sid,
+      'obj_id': 'o$id',
+      'obj_hash': 'h$id',
+      'sys_from': null,
+      'subject_name': subject,
+      'subject_id': 's-$subject',
+      'teacher_id': 't1',
+      'room': room,
+      'theme': null,
+      'link': null,
+      'firstname': 'Анна',
+      'lastname': 'Петрова',
+      'patronymic': 'Ивановна',
+      'minutes': null,
+      'active': true,
+      'start_datetime': '${date}T$start',
+      'end_datetime': '${date}T$end',
+      'lesson_description': null,
+      'is_distant': null,
+      'skipping_id': skip,
+      'skip_date': skip == null ? null : date,
+      'type_code': null,
+      'type_value': null,
+      'type_description': skip == null ? null : 'Болезнь',
+      'skipping_description': null,
+      'lesson_type': 1,
+    };
+
+Map<String, dynamic> mark(String id, String date, String subject, String value,
+        {String? weight = '1', String? lessonId, String period = 'P2', String work = 'Работа на уроке'}) =>
+    {
+      'weight': weight,
+      'comment': null,
+      'id': id,
+      'student_id': sid,
+      'obj_id': 'o$id',
+      'obj_hash': 'h$id',
+      'sys_from': null,
+      'marks_id': 'mk$id',
+      'period_id': period,
+      'subject_name': subject,
+      'subject_id': 's-$subject',
+      'teacher_id': 't1',
+      'mark_value1': value,
+      'mark_value2': null,
+      'mark_date': date,
+      'work_type_code': 'W',
+      'work_type_value': 1,
+      'work_type_description': work,
+      'work_name': null,
+      'scale_description': 'Пятибалльная',
+      'work_kind': null,
+      'scale_code': 'FIVE',
+      'scale_value': '5',
+      'send_datetime': '${date}T12:00:00',
+      'start_datetime': null,
+      'lesson_id': lessonId,
+      'students_test': [
+        {'weight': '1', 'mark_value1': '4', 'mark_value2': null, 'student_id': 'x', 'work_type_description': 'Тест'},
+      ],
+      'create_datetime': '${date}T12:00:00',
+      'correction_maybe': null,
+      'correction_date': null,
+      'end_datetime': '${date}T09:15:00',
+    };
+
+Map<String, dynamic> homework(String id, String issue, String due, String subject, String text,
+        {String? readyLesson, List<Map<String, dynamic>> materials = const []}) =>
+    {
+      'description': text,
+      'materials': materials,
+      'create_datetime': '${issue}T10:00:00',
+      'send_datetime': '${issue}T10:00:00',
+      'id': id,
+      'student_id': sid,
+      'obj_id': 'o$id',
+      'obj_hash': 'h$id',
+      'sys_from': null,
+      'homeworks_id': 'hw$id',
+      'issue_date': issue,
+      'plan_ready_date': due,
+      'issue_lesson_id': 'issue-$id',
+      'teacher_id': 't1',
+      'ready_lesson_id': readyLesson ?? 'none',
+      'subject_name': subject,
+      'subject_id': 's-$subject',
+    };
+
+Map<String, dynamic> classes() => {
+      'periods': [
+        for (final p in [
+          ['P1', '1', '2026-09-01', '2026-10-25', 'Q', 'Четверть', true],
+          ['V1', '1', '2026-10-26', '2026-11-04', 'H', 'Каникулы', false],
+          ['P2', '2', '2026-11-05', '2026-12-28', 'Q', 'Четверть', true],
+          ['P3', '3', '2027-01-09', '2027-03-22', 'Q', 'Четверть', true],
+          ['P4', '4', '2027-03-30', '2027-05-26', 'Q', 'Четверть', true],
+          ['Y', '1', '2026-09-01', '2027-05-26', 'Y', 'Учебный год', true],
+        ])
+          {
+            'period_id': p[0],
+            'period_num': p[1],
+            'period_start_date': p[2],
+            'period_end_date': p[3],
+            'period_type_code': p[4],
+            'period_type_value': '1',
+            'period_type_descrioption': p[5],
+            'period_is_study': p[6],
+            'class_start_date': '2026-09-01',
+            'class_end_date': '2027-05-26',
+          },
+      ],
+      'attendance': 'x',
+      'id': 'c1',
+      'student_id': sid,
+      'obj_id': 'oc1',
+      'obj_hash': 'hc1',
+      'sys_from': null,
+      'short_name': '11 «А»',
+      'school_id': 'sch',
+      'class_id': 'cl',
+      'class_num': '11',
+      'class_letter': 'А',
+      'diary_id': 'd',
+      'academ_year': 2026,
+    };
+
+Map<String, dynamic> dm(String type, String interval, List<Map<String, dynamic>> data, {String status = 'snapshot'}) => {
+      'hash': 'H-$type-$interval',
+      'student_id': sid,
+      'interval_id': interval,
+      'obj_type': type,
+      'data_status': status,
+      'data': data,
+    };
+

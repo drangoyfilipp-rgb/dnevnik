@@ -76,3 +76,66 @@ String shareDayText(Day d, {bool onlyHomework = true}) {
   }
   return b.toString();
 }
+
+String _num(double w) => w % 1 == 0 ? w.toInt().toString() : w.toString();
+
+String _avgText(double a) => a.toStringAsFixed(2).replaceAll('.', ',');
+
+/// A whole day: every lesson (number, time, room) with its homework, files and marks.
+String shareDayFull(Day d) {
+  final b = StringBuffer(shortDate(d.date));
+  final lessons = d.lessons.where((l) => l.isLesson).toList();
+  final extra = d.lessons.where((l) => !l.isLesson && l.hasHomework).toList();
+  if (lessons.isEmpty && extra.isEmpty) {
+    b.write('\nУроков нет');
+    return b.toString();
+  }
+  for (final l in lessons) {
+    final head = [
+      '${l.number.isEmpty ? '•' : '${l.number}.'} ${l.subject}',
+      if (l.time.isNotEmpty) l.time,
+      if (l.room.isNotEmpty) 'каб. ${l.room}',
+    ].join(', ');
+    b.write('\n$head');
+    final hw = cleanShareBody(l.homework);
+    if (hw.isNotEmpty) b.write('\n   ДЗ: ${hw.replaceAll('\n', '\n   ')}');
+    final names = l.files.map((f) => f.name.trim()).where((n) => n.isNotEmpty).toSet();
+    if (names.isNotEmpty) b.write('\n   Файлы: ${names.join(', ')}');
+    if (l.marks.isNotEmpty) b.write('\n   Оценки: ${l.marks.map((m) => m.value).join(', ')}');
+  }
+  for (final l in extra) {
+    final hw = cleanShareBody(l.homework);
+    final names = l.files.map((f) => f.name.trim()).where((n) => n.isNotEmpty).toSet();
+    b.write('\n• ${l.subject}: ${hw.isEmpty ? '' : hw}${names.isEmpty ? '' : ' (файлы: ${names.join(', ')})'}');
+  }
+  return b.toString();
+}
+
+/// One subject's marks: subject, period, each mark with date and kind, the average.
+String shareSubjectMarks(SubjectMarks s, {String period = ''}) {
+  final b = StringBuffer(period.isEmpty ? s.subject : '${s.subject} · $period');
+  final avg = s.computedAverage;
+  if (s.marks.isEmpty) {
+    b.write('\nОценок нет');
+    return b.toString();
+  }
+  b.write('\nОценки: ${s.marks.map((m) => m.weight == 1 ? m.value : '${m.value}×${_num(m.weight)}').join(', ')}');
+  if (avg != null) b.write('\nСредний балл: ${_avgText(avg)}');
+  for (final m in s.marks) {
+    final date = m.date == null ? '' : '${m.date!.day.toString().padLeft(2, '0')}.${m.date!.month.toString().padLeft(2, '0')}';
+    final info = [if (m.comment.isNotEmpty) cleanShareBody(m.comment), if (m.weight != 1) 'вес ${_num(m.weight)}'].join(', ');
+    b.write('\n${date.isEmpty ? '' : '$date — '}${m.value}${info.isEmpty ? '' : ' ($info)'}');
+  }
+  return b.toString();
+}
+
+/// All subjects at once (Оценки → Поделиться).
+String shareAllMarks(List<SubjectMarks> subjects, {String period = ''}) {
+  final b = StringBuffer(period.isEmpty ? 'Оценки' : 'Оценки · $period');
+  for (final s in subjects) {
+    if (s.marks.isEmpty) continue;
+    final avg = s.computedAverage;
+    b.write('\n${s.subject}: ${s.marks.map((m) => m.value).join(' ')}${avg == null ? '' : ' — ${_avgText(avg)}'}');
+  }
+  return b.toString();
+}

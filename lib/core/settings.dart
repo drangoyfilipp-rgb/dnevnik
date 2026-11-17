@@ -43,6 +43,9 @@ class AppSettings extends ChangeNotifier {
   bool gradesByDate = false;
   int lockAfterSeconds = 60;
 
+  /// Bell schedule «08:30–09:15» per lesson number (index 0 = 1st lesson). Empty = unknown.
+  List<String> bells = [];
+
   Future<void> load() async {
     _p = await SharedPreferences.getInstance();
     themeMode = ThemeMode.values[(_p.getInt('themeMode') ?? 0).clamp(0, 2)];
@@ -71,6 +74,7 @@ class AppSettings extends ChangeNotifier {
     hwByWeek = _p.getBool('hwByWeek') ?? false;
     gradesByDate = _p.getBool('gradesByDate') ?? false;
     lockAfterSeconds = _p.getInt('lockAfterSeconds') ?? 60;
+    bells = _p.getStringList('bells') ?? [];
   }
 
   List<AppTab> get visibleTabs {
@@ -100,5 +104,23 @@ class AppSettings extends ChangeNotifier {
     await _p.setBool('hwByWeek', hwByWeek);
     await _p.setBool('gradesByDate', gradesByDate);
     await _p.setInt('lockAfterSeconds', lockAfterSeconds);
+    await _p.setStringList('bells', bells);
   }
+}
+
+/// Parses the bell schedule text: one lesson per line, «8:30-9:15» / «08:30 – 09:15».
+/// Returns normalized «08:30–09:15» lines; null when a line is not a time range.
+List<String>? parseBells(String text) {
+  final out = <String>[];
+  for (final raw in text.split('\n')) {
+    final line = raw.trim();
+    if (line.isEmpty) continue;
+    final m = RegExp(r'^(?:\d{1,2}[.)]\s*)?(\d{1,2})[:.](\d{2})\s*[-–—]\s*(\d{1,2})[:.](\d{2})$').firstMatch(line);
+    if (m == null) return null;
+    String hm(String h, String mi) => '${h.padLeft(2, '0')}:$mi';
+    final a = hm(m.group(1)!, m.group(2)!), b = hm(m.group(3)!, m.group(4)!);
+    if (int.parse(m.group(1)!) > 23 || int.parse(m.group(3)!) > 23 || a.compareTo(b) >= 0) return null;
+    out.add('$a–$b');
+  }
+  return out;
 }

@@ -73,6 +73,13 @@ DateTime? parseLooseDateTime(dynamic v) {
   if (s.isEmpty) return null;
   if (RegExp(r'^\d{9,13}$').hasMatch(s)) return parseLooseDateTime(int.parse(s));
   final iso = RegExp(r'^\d{4}-\d{2}-\d{2}').firstMatch(s);
+  // An explicit offset (+03:00) is the school's own wall clock: keep it literally,
+  // so the date/time does not move with the phone's time zone.
+  final wall = RegExp(r'^(\d{4})-(\d{2})-(\d{2})[T ](\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?\s*[+-]\d{2}:?\d{2}$').firstMatch(s);
+  if (wall != null) {
+    int g(int i) => int.tryParse(wall.group(i) ?? '') ?? 0;
+    return DateTime(g(1), g(2), g(3), g(4), g(5), g(6));
+  }
   if (iso != null) {
     final p = DateTime.tryParse(s.replaceFirst(' ', 'T'));
     if (p != null) return p.isUtc ? p.toLocal() : p;

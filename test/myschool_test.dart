@@ -78,14 +78,12 @@ void main() {
       ]);
       s.applyResponse([item('student_lessons', 'snapshot', const [], hash: 'ours')]);
       final bodies = s.buildRequests();
+      expect(bodies.length, 1);
       final first = bodies.first;
-      expect(first.length, 1, reason: 'unwanted obj_types are not replayed');
+      expect(first.length, 1, reason: 'unwanted obj_types are not replayed, no interval-less extras');
       expect(first.single['interval_id'], 'I1');
       expect(first.single['hash'], 'ours');
-      // Other wanted types are asked without interval, with the learned student id.
-      final extra = bodies.last.map((i) => i['obj_type']).toSet();
-      expect(extra, containsAll(['student_homeworks_materials', 'student_marks', 'student_pmarks', 'student_ymarks']));
-      expect(bodies.last.first['student_id'], 777001);
+      expect(first.single['student_id'], '777001');
 
       // JSON round trip keeps everything.
       final back = DatamartStore.fromJson(jsonDecode(jsonEncode(s.toJson())) as Map<String, dynamic>);
@@ -220,6 +218,7 @@ void main() {
       final d = buildDiary(s);
       expect(d.days.single.lessons.single.subject, 'Алгебра');
       expect(d.finals!.rows.single.values, ['5']);
+      expect(d.finals!.forecast, isFalse);
     });
   });
 

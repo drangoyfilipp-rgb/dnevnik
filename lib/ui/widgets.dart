@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../core/models.dart';
+import '../core/myschool.dart' show roundedMark;
 import '../core/share_format.dart';
 import '../core/util.dart';
 import '../services.dart';
@@ -40,50 +41,117 @@ String timeAgo(DateTime t) {
 Color markColor(BuildContext context, Mark m) {
   final n = m.numeric;
   final c = Theme.of(context).colorScheme;
-  if (n == null) return c.surfaceContainerHighest;
+  if (n == null) return c.outline;
   if (n >= 4.5) return Colors.green.shade600;
-  if (n >= 3.5) return Colors.lightGreen.shade700;
+  if (n >= 3.5) return Colors.teal.shade600;
   if (n >= 2.5) return Colors.orange.shade700;
   return Colors.red.shade600;
 }
 
+Color avgColor(BuildContext context, double? a) =>
+    a == null ? Theme.of(context).colorScheme.outline : markColor(context, Mark(value: roundedMark(a)));
+
+String fmtAvg(double a) => a.toStringAsFixed(2).replaceAll('.', ',');
+String fmtWeight(double w) => w % 1 == 0 ? w.toInt().toString() : w.toString();
+
+/// A mark as in the official app: a rounded square, weight as a small badge.
 class MarkChip extends StatelessWidget {
-  const MarkChip({super.key, required this.mark, this.showDate = false});
+  const MarkChip({super.key, required this.mark, this.size = 34, this.forecast = false});
   final Mark mark;
-  final bool showDate;
+  final double size;
+  final bool forecast;
   @override
   Widget build(BuildContext context) {
-    final bg = markColor(context, mark);
-    final fg = mark.numeric == null ? Theme.of(context).colorScheme.onSurface : Colors.white;
+    final col = markColor(context, mark);
     final tip = [
       if (mark.date != null) dayMonth(mark.date!),
-      if (mark.weight != 1) 'вес ${mark.weight % 1 == 0 ? mark.weight.toInt() : mark.weight}',
+      if (mark.weight != 1) 'вес ${fmtWeight(mark.weight)}',
       if (mark.comment.isNotEmpty) mark.comment,
     ].join(' · ');
-    final chip = Container(
-      constraints: const BoxConstraints(minWidth: 30),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(8)),
-      child: Row(mainAxisSize: MainAxisSize.min, children: [
-        Text(mark.value, style: TextStyle(color: fg, fontWeight: FontWeight.w600)),
-        if (mark.weight != 1)
-          Padding(
-            padding: const EdgeInsets.only(left: 3),
-            child: Text('×${mark.weight % 1 == 0 ? mark.weight.toInt() : mark.weight}',
-                style: TextStyle(color: fg.withValues(alpha: 0.85), fontSize: 11)),
-          ),
-        if (showDate && mark.date != null)
-          Padding(
-            padding: const EdgeInsets.only(left: 4),
-            child: Text('${mark.date!.day}.${mark.date!.month.toString().padLeft(2, '0')}',
-                style: TextStyle(color: fg.withValues(alpha: 0.85), fontSize: 11)),
-          ),
-      ]),
+    final box = Container(
+      constraints: BoxConstraints(minWidth: size, minHeight: size),
+      padding: const EdgeInsets.symmetric(horizontal: 6),
+      decoration: BoxDecoration(
+        color: col.withValues(alpha: forecast ? 0.06 : 0.12),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: col.withValues(alpha: forecast ? 0.5 : 0.9), width: forecast ? 1 : 1.4),
+      ),
+      child: Center(
+        widthFactor: 1,
+        heightFactor: 1,
+        child: Text(mark.value,
+            style: TextStyle(color: col, fontWeight: FontWeight.w700, fontSize: size * 0.45, height: 1.1)),
+      ),
     );
+    final chip = mark.weight == 1
+        ? box
+        : Stack(clipBehavior: Clip.none, children: [
+            box,
+            Positioned(
+              right: size < 32 ? -6 : -5,
+              bottom: size < 32 ? -6 : -5,
+              child: Container(
+                width: size < 32 ? 14 : 17,
+                height: size < 32 ? 14 : 17,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(color: Theme.of(context).colorScheme.primary, shape: BoxShape.circle),
+                child: Text(fmtWeight(mark.weight),
+                    style: TextStyle(
+                        color: Theme.of(context).colorScheme.onPrimary,
+                        fontSize: size < 32 ? 8.5 : 10,
+                        fontWeight: FontWeight.w700)),
+              ),
+            ),
+          ]);
     return tip.isEmpty ? chip : Tooltip(message: tip, triggerMode: TooltipTriggerMode.tap, child: chip);
   }
 }
 
+/// Lesson number in a tinted circle.
+class LessonNumber extends StatelessWidget {
+  const LessonNumber(this.number, {super.key});
+  final String number;
+  @override
+  Widget build(BuildContext context) {
+    final c = Theme.of(context).colorScheme;
+    return Container(
+      width: 30,
+      height: 30,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(color: c.primaryContainer, shape: BoxShape.circle),
+      child: Text(number.isEmpty ? '•' : number,
+          style: TextStyle(color: c.onPrimaryContainer, fontWeight: FontWeight.w700)),
+    );
+  }
+}
+
+class SmallTag extends StatelessWidget {
+  const SmallTag(this.text, {super.key, this.icon, this.color});
+  final String text;
+  final IconData? icon;
+  final Color? color;
+  @override
+  Widget build(BuildContext context) {
+    final c = Theme.of(context).colorScheme;
+    final fg = color ?? c.onSecondaryContainer;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+          color: color == null ? c.secondaryContainer : color!.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6)),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        if (icon != null) Padding(padding: const EdgeInsets.only(right: 3), child: Icon(icon, size: 13, color: fg)),
+        Text(text, style: Theme.of(context).textTheme.labelSmall?.copyWith(color: fg)),
+      ]),
+    );
+  }
+}
+
+String lessonMeta(Lesson l) => [
+      if (l.room.isNotEmpty) 'каб. ${l.room}',
+      if (l.teacher.isNotEmpty) l.teacher,
+    ].join(' · ');
+
+/// Day card row: number + time, subject, room/teacher, homework snippet, files, marks.
 class LessonCard extends StatelessWidget {
   const LessonCard({super.key, required this.lesson, required this.date, this.showHomework = true});
   final Lesson lesson;
@@ -95,55 +163,160 @@ class LessonCard extends StatelessWidget {
     final compact = Services.I.settings.compact;
     final t = Theme.of(context).textTheme;
     final c = Theme.of(context).colorScheme;
+    final meta = lessonMeta(lesson);
+    final times = lesson.time.split(RegExp(r'[–-]'));
     return Card(
-      margin: EdgeInsets.symmetric(horizontal: 12, vertical: compact ? 3 : 5),
+      margin: EdgeInsets.symmetric(horizontal: 12, vertical: compact ? 3 : 4),
+      elevation: 0,
+      color: c.surfaceContainerLow,
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: () => showLessonSheet(context, lesson, date),
         child: Padding(
-          padding: EdgeInsets.all(compact ? 10 : 14),
+          padding: EdgeInsets.fromLTRB(12, compact ? 8 : 12, 12, compact ? 8 : 12),
           child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
             SizedBox(
-              width: 46,
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                if (lesson.number.isNotEmpty) Text(lesson.number, style: t.titleMedium?.copyWith(color: c.primary)),
-                if (lesson.time.isNotEmpty)
-                  Text(lesson.time.replaceAll('–', '\n').replaceAll('-', '\n'), style: t.bodySmall),
+              width: 44,
+              child: Column(children: [
+                lesson.isLesson ? LessonNumber(lesson.number) : Icon(Icons.assignment_outlined, color: c.primary),
+                if (lesson.time.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  for (final x in times) Text(x.trim(), style: t.labelSmall?.copyWith(color: c.onSurfaceVariant)),
+                ],
               ]),
             ),
+            const SizedBox(width: 8),
             Expanded(
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 Row(children: [
-                  Expanded(child: Text(lesson.subject, style: t.titleMedium)),
-                  if (lesson.hasHomework && !showHomework)
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                      decoration: BoxDecoration(color: c.secondaryContainer, borderRadius: BorderRadius.circular(6)),
-                      child: Text('ДЗ', style: t.labelSmall),
-                    ),
+                  Flexible(child: Text(lesson.subject, style: t.titleMedium?.copyWith(fontWeight: FontWeight.w600))),
+                  if (lesson.hasHomework && !showHomework) ...[const SizedBox(width: 6), const SmallTag('ДЗ')],
+                  if (lesson.absence.isNotEmpty) ...[
+                    const SizedBox(width: 6),
+                    SmallTag(lesson.absence, color: c.error),
+                  ],
                 ]),
+                if (meta.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(meta, style: t.bodySmall?.copyWith(color: c.onSurfaceVariant)),
+                  ),
                 if (lesson.topic.isNotEmpty && !compact)
                   Padding(
                     padding: const EdgeInsets.only(top: 2),
-                    child: Text(lesson.topic, style: t.bodySmall, maxLines: 2, overflow: TextOverflow.ellipsis),
+                    child: Text(lesson.topic, style: t.bodySmall, maxLines: 1, overflow: TextOverflow.ellipsis),
                   ),
                 if (showHomework && lesson.homework.isNotEmpty)
                   Padding(
                     padding: const EdgeInsets.only(top: 6),
-                    child: Text(lesson.homework, style: t.bodyMedium, maxLines: compact ? 3 : 8, overflow: TextOverflow.ellipsis),
+                    child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2, right: 6),
+                        child: Icon(Icons.home_work_outlined, size: 16, color: c.primary),
+                      ),
+                      Expanded(
+                        child: Text(lesson.homework,
+                            style: t.bodyMedium, maxLines: compact ? 2 : 3, overflow: TextOverflow.ellipsis),
+                      ),
+                    ]),
                   ),
                 if (showHomework && lesson.files.isNotEmpty)
                   Padding(padding: const EdgeInsets.only(top: 6), child: AttachmentRow(files: lesson.files)),
-                if (lesson.marks.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 6),
-                    child: Wrap(spacing: 4, runSpacing: 4, children: lesson.marks.map((m) => MarkChip(mark: m)).toList()),
-                  ),
               ]),
             ),
+            if (lesson.marks.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(left: 8, top: 2),
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  for (final m in lesson.marks)
+                    Padding(padding: const EdgeInsets.only(bottom: 8), child: MarkChip(mark: m, size: 32)),
+                ]),
+              ),
           ]),
         ),
       ),
+    );
+  }
+}
+
+/// Homework item (Задания): subject, text, files, share.
+class HomeworkCard extends StatelessWidget {
+  const HomeworkCard({super.key, required this.lesson, required this.date, this.showDate = false});
+  final Lesson lesson;
+  final DateTime date;
+  final bool showDate;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context).textTheme;
+    final c = Theme.of(context).colorScheme;
+    final sub = [
+      if (showDate) dayLong(date),
+      if (lesson.isLesson && lesson.number.isNotEmpty) 'к ${lesson.number} уроку',
+    ].join(' · ');
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      elevation: 0,
+      color: c.surfaceContainerLow,
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: () => showLessonSheet(context, lesson, date),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 8, 4, 12),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(lesson.subject, style: t.titleSmall?.copyWith(fontWeight: FontWeight.w700)),
+                  if (sub.isNotEmpty) Text(sub, style: t.bodySmall?.copyWith(color: c.onSurfaceVariant)),
+                ]),
+              ),
+              ...lesson.marks.map((m) => Padding(padding: const EdgeInsets.only(left: 4), child: MarkChip(mark: m, size: 28))),
+              IconButton(
+                tooltip: 'Поделиться',
+                icon: const Icon(Icons.share_outlined, size: 20),
+                onPressed: () => shareHomework(context, lesson, date),
+              ),
+            ]),
+            if (lesson.homework.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(right: 10, top: 2),
+                child: Text(lesson.homework, style: t.bodyMedium, maxLines: 6, overflow: TextOverflow.ellipsis),
+              ),
+            if (lesson.files.isNotEmpty)
+              Padding(padding: const EdgeInsets.only(top: 8, right: 10), child: AttachmentRow(files: lesson.files)),
+          ]),
+        ),
+      ),
+    );
+  }
+}
+
+/// Day header: «Вторник, 17 ноября · сегодня» + share the whole day.
+class DayHeader extends StatelessWidget {
+  const DayHeader({super.key, required this.day, this.homeworkOnly = false, this.label});
+  final Day day;
+  final bool homeworkOnly;
+  final String? label;
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context).textTheme;
+    final isToday = sameDay(day.date, today());
+    final isTomorrow = sameDay(day.date, today().add(const Duration(days: 1)));
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 4, 2),
+      child: Row(children: [
+        Expanded(
+          child: Text(label ?? '${dayLong(day.date)}${isToday ? ' · сегодня' : (isTomorrow ? ' · завтра' : '')}',
+              style: t.titleSmall?.copyWith(color: Theme.of(context).colorScheme.primary, fontWeight: FontWeight.w700)),
+        ),
+        IconButton(
+          visualDensity: VisualDensity.compact,
+          tooltip: homeworkOnly ? 'Поделиться заданиями дня' : 'Поделиться днём',
+          icon: const Icon(Icons.share_outlined, size: 20),
+          onPressed: () => FileActions.shareText(homeworkOnly ? shareDayText(day) : shareDayFull(day)),
+        ),
+      ]),
     );
   }
 }
@@ -155,6 +328,49 @@ Future<void> copyText(BuildContext context, String text) async {
   }
 }
 
+/// Share a homework: text only, text + files, or copy.
+Future<void> shareHomework(BuildContext context, Lesson l, DateTime date) async {
+  final text = shareLessonText(l, date);
+  if (l.files.isEmpty) {
+    await FileActions.shareText(text);
+    return;
+  }
+  await showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    builder: (ctx) => SafeArea(
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
+        ListTile(
+          leading: const Icon(Icons.short_text),
+          title: const Text('Текст задания'),
+          subtitle: const Text('Дата, предмет, задание, названия файлов'),
+          onTap: () {
+            Navigator.pop(ctx);
+            FileActions.shareText(text);
+          },
+        ),
+        ListTile(
+          leading: const Icon(Icons.attach_file),
+          title: Text(l.files.length == 1 ? 'Текст и файл' : 'Текст и файлы (${l.files.length})'),
+          subtitle: const Text('Файлы скачаются и отправятся вместе с текстом'),
+          onTap: () {
+            Navigator.pop(ctx);
+            FileActions.shareFiles(context, l.files, text: text);
+          },
+        ),
+        ListTile(
+          leading: const Icon(Icons.copy),
+          title: const Text('Копировать текст'),
+          onTap: () {
+            Navigator.pop(ctx);
+            copyText(context, text);
+          },
+        ),
+      ]),
+    ),
+  );
+}
+
 void showLessonSheet(BuildContext context, Lesson l, DateTime date) {
   showModalBottomSheet(
     context: context,
@@ -164,6 +380,7 @@ void showLessonSheet(BuildContext context, Lesson l, DateTime date) {
     builder: (ctx) {
       final t = Theme.of(ctx).textTheme;
       final share = shareLessonText(l, date, includeTopic: false);
+      final meta = lessonMeta(l);
       return DraggableScrollableSheet(
         expand: false,
         initialChildSize: 0.6,
@@ -172,8 +389,15 @@ void showLessonSheet(BuildContext context, Lesson l, DateTime date) {
           child: ListView(controller: controller, padding: const EdgeInsets.fromLTRB(20, 0, 20, 24), children: [
             Text(l.subject, style: t.headlineSmall),
             const SizedBox(height: 4),
-            Text([dayLong(date), if (l.number.isNotEmpty) '${l.number} урок', if (l.time.isNotEmpty) l.time].join(' · '),
+            Text(
+                [
+                  dayLong(date),
+                  if (l.isLesson && l.number.isNotEmpty) '${l.number} урок',
+                  if (l.time.isNotEmpty) l.time,
+                ].join(' · '),
                 style: t.bodyMedium),
+            if (meta.isNotEmpty) Text(meta, style: t.bodyMedium),
+            if (l.absence.isNotEmpty) Text(l.absence, style: t.bodyMedium?.copyWith(color: Theme.of(ctx).colorScheme.error)),
             if (l.topic.isNotEmpty) ...[
               const SizedBox(height: 16),
               Text('Тема', style: t.labelLarge),
@@ -189,17 +413,16 @@ void showLessonSheet(BuildContext context, Lesson l, DateTime date) {
             if (l.marks.isNotEmpty) ...[
               const SizedBox(height: 16),
               Text('Оценки', style: t.labelLarge),
-              const SizedBox(height: 4),
+              const SizedBox(height: 6),
               for (final m in l.marks)
                 Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 3),
+                  padding: const EdgeInsets.symmetric(vertical: 4),
                   child: Row(children: [
                     MarkChip(mark: m),
-                    const SizedBox(width: 10),
+                    const SizedBox(width: 12),
                     Expanded(
                         child: Text([
-                      if (m.kind == 'hometask') 'за ДЗ',
-                      if (m.weight != 1) 'вес ${m.weight % 1 == 0 ? m.weight.toInt() : m.weight}',
+                      if (m.weight != 1) 'вес ${fmtWeight(m.weight)}',
                       if (m.comment.isNotEmpty) m.comment,
                     ].join(' · '))),
                   ]),
@@ -207,11 +430,7 @@ void showLessonSheet(BuildContext context, Lesson l, DateTime date) {
             ],
             const SizedBox(height: 20),
             Wrap(spacing: 8, runSpacing: 8, children: [
-              OutlinedButton.icon(
-                  onPressed: () => copyText(ctx, l.homework.isEmpty ? share : l.homework),
-                  icon: const Icon(Icons.copy),
-                  label: const Text('Копировать')),
-              OutlinedButton.icon(
+              FilledButton.tonalIcon(
                   onPressed: () => FileActions.shareText(share),
                   icon: const Icon(Icons.share_outlined),
                   label: const Text('Поделиться')),
@@ -219,7 +438,11 @@ void showLessonSheet(BuildContext context, Lesson l, DateTime date) {
                 OutlinedButton.icon(
                     onPressed: () => FileActions.shareFiles(ctx, l.files, text: share),
                     icon: const Icon(Icons.attach_file),
-                    label: Text(l.files.length == 1 ? 'Отправить файл' : 'Отправить файлы')),
+                    label: Text(l.files.length == 1 ? 'С файлом' : 'С файлами')),
+              OutlinedButton.icon(
+                  onPressed: () => copyText(ctx, l.homework.isEmpty ? share : l.homework),
+                  icon: const Icon(Icons.copy),
+                  label: const Text('Копировать')),
             ]),
           ]),
         ),

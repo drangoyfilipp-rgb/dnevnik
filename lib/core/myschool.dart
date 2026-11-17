@@ -22,7 +22,14 @@ const List<String> kWantedObjTypes = [
   'student_marks',
   'student_pmarks',
   'student_ymarks',
+  'student_classes',
 ];
+
+/// obj_types asked per week interval (same interval ids as the web app uses).
+const List<String> kWeeklyObjTypes = ['student_lessons', 'student_homeworks_materials', 'student_marks'];
+
+/// Final marks; the portal answers 400 without a valid interval_id, so they are only probed.
+const List<String> kFinalObjTypes = ['student_pmarks', 'student_ymarks'];
 
 /// Path of a URL with digits/uuids masked — safe for logs and the export.
 String maskApiPath(String urlOrPath) {
@@ -160,6 +167,47 @@ class DatamartStore {
   /// Student id learned from requests or from v2/auth/student.
   String? studentId;
 
+  /// v1/current_year answer (academic year), learned from the web app.
+  String? currentYear;
+
+  /// Final-mark probes the portal rejected: «obj_type|interval» → when (ISO).
+  final Map<String, String> failedProbes = {};
+
+  /// Single-item requests to try for final marks (pmarks/ymarks), which the web app
+  /// does not ask on the pages we saw. Candidates: the class/year interval, academ_year,
+  /// current_year and the main period ids. Rejected ones are retried after [retryAfter].
+  List<Map<String, dynamic>> finalProbes({DateTime? now, Duration retryAfter = const Duration(days: 3), int max = 8}) {
+    final sid = requestStudentId;
+    if (sid == null) return const [];
+    final when = now ?? DateTime.now();
+    final cands = <String>[];
+    void add(dynamic v) {
+      final t = _s(v);
+      if (t.isNotEmpty && !cands.contains(t)) cands.add(t);
+    }
+
+    for (final e in entriesOf('student_classes')) {
+      add(e.intervalId);
+      for (final o in e.objects.values) {
+        add(o['academ_year']);
+      }
+    }
+    add(currentYear);
+    for (final p in mainPeriods(parsePeriods(objectsOf('student_classes')))) {
+      add(p.id);
+    }
+    final out = <Map<String, dynamic>>[];
+    for (final t in kFinalObjTypes) {
+      if (entriesOf(t).any((e) => e.objects.isNotEmpty)) continue; // already works → replayed
+      for (final c in cands) {
+        final failed = DateTime.tryParse(failedProbes['$t|$c'] ?? '');
+        if (failed != null && when.difference(failed) < retryAfter) continue;
+        out.add({'interval_id': c, 'obj_type': t, 'student_id': sid, 'hash': null});
+      }
+    }
+    return out.take(max).toList();
+  }
+
   static String keyOf(String t, String s, String i) => '$t|$s|$i';
 
   bool get isEmpty => entries.values.every((e) => e.objects.isEmpty);
@@ -243,36 +291,77 @@ class DatamartStore {
     }
   }
 
-  /// Bodies to POST to the datamart now: learned requests with our stored hashes,
-  /// or a constructed one when only the student id is known.
-  List<List<Map<String, dynamic>>> buildRequests({List<String> wanted = kWantedObjTypes}) {
-    final out = <List<Map<String, dynamic>>>[];
-    final covered = <String>{};
-    for (final r in requests) {
-      final items = r.where((i) => wanted.contains(i['obj_type'])).toList();
-      if (items.isEmpty) continue;
-      out.add([
-        for (final i in items)
-          {
-            ...i,
-            'hash': entries[keyOf(_s(i['obj_type']), _s(i['student_id']), _s(i['interval_id']))]?.hash,
-          }
-      ]);
-      covered.addAll(items.map((i) => _s(i['obj_type'])));
+  /// Bodies to POST to the datamart now: every stored (obj_type, interval) of a wanted
+  /// type with our hash, plus learned requests not stored yet. Never an item without
+  /// interval_id for types that need one (the portal answers 400 to the whole batch).
+  List<List<Map<String, dynamic>>> buildRequests({List<String> wanted = kWantedObjTypes, int chunk = 12}) {
+    final items = <Map<String, dynamic>>[];
+    final seen = <String>{};
+    void add(String t, dynamic sid, String iid) {
+      final k = keyOf(t, _s(sid), iid);
+      if (!seen.add(k)) return;
+      items.add({
+        if (iid.isNotEmpty) 'interval_id': iid,
+        'obj_type': t,
+        'student_id': sid is String ? sid : _s(sid),
+        'hash': entries[k]?.hash,
+      });
     }
-    final sid = studentId;
-    if (sid != null) {
-      final missing = wanted.where((t) => !covered.contains(t)).toList();
-      if (missing.isNotEmpty) {
-        out.add([
-          for (final t in missing) {'obj_type': t, 'student_id': _numOrString(sid), 'hash': entries[keyOf(t, sid, '')]?.hash},
-        ]);
+
+    for (final r in requests) {
+      for (final i in r) {
+        final t = _s(i['obj_type']);
+        if (!wanted.contains(t)) continue;
+        add(t, i['student_id'], _s(i['interval_id']));
       }
+    }
+    for (final e in entries.values) {
+      if (!wanted.contains(e.objType) || e.status == 'error' || e.studentId.isEmpty) continue;
+      if (e.intervalId.isEmpty && kFinalObjTypes.contains(e.objType)) continue;
+      add(e.objType, e.studentId, e.intervalId);
+    }
+    final out = <List<Map<String, dynamic>>>[];
+    for (var i = 0; i < items.length; i += chunk) {
+      out.add(items.sublist(i, i + chunk > items.length ? items.length : i + chunk));
     }
     return out;
   }
 
-  static dynamic _numOrString(String s) => int.tryParse(s) ?? s;
+  /// Student id as the web app sends it (a string in all observed requests).
+  String? get requestStudentId {
+    for (final r in requests) {
+      for (final i in r) {
+        final v = _s(i['student_id']);
+        if (v.isNotEmpty) return v;
+      }
+    }
+    return studentId;
+  }
+
+  /// Date range of lessons/homework/marks in each stored interval of [objType].
+  List<IntervalSpan> intervalSpans(String objType) {
+    final out = <IntervalSpan>[];
+    for (final e in entriesOf(objType)) {
+      DateTime? lo, hi;
+      for (final o in e.objects.values) {
+        final d = objectDate(objType, o);
+        if (d == null) continue;
+        if (lo == null || d.isBefore(lo)) lo = d;
+        if (hi == null || d.isAfter(hi)) hi = d;
+      }
+      if (lo != null) out.add(IntervalSpan(e.intervalId, lo, hi!, e.objects.length));
+    }
+    return out;
+  }
+
+  /// Week interval model learned from what the web app asked (null = unknown shape).
+  WeekIntervalModel? get weekModel {
+    final spans = [
+      ...intervalSpans('student_lessons'),
+      ...intervalSpans('student_marks'),
+    ];
+    return WeekIntervalModel.fit(spans);
+  }
 
   static String objId(Map<String, dynamic> o, int index) {
     for (final k in ['obj_id', 'id', 'uuid', 'obj_hash']) {
@@ -350,6 +439,8 @@ class DatamartStore {
         'entries': entries.values.map((e) => e.toJson()).toList(),
         'requests': requests,
         'student': studentId,
+        'year': currentYear,
+        'failed': failedProbes,
       };
 
   static DatamartStore fromJson(Map<String, dynamic> j) {
@@ -366,6 +457,9 @@ class DatamartStore {
       }
     }
     s.studentId = j['student'] as String?;
+    s.currentYear = j['year'] as String?;
+    final f = j['failed'];
+    if (f is Map) f.forEach((k, v) => s.failedProbes['$k'] = '$v');
     return s;
   }
 
@@ -377,6 +471,16 @@ class DatamartStore {
       b.writeln('  запрос: ${r.map((i) => '${i['obj_type']}${_s(i['interval_id']).isEmpty ? '' : '[interval]'}'
           ' {${i.keys.where((k) => k != 'obj_type').join(',')}}').join('; ')}');
     }
+    final wm = weekModel;
+    b.writeln('  интервалы недель: ${wm == null ? 'модель не найдена' : wm.describe()}');
+    final mon = mondayOf(DateTime.now());
+    for (final t in kWeeklyObjTypes) {
+      final spans = intervalSpans(t)..sort((x, y) => x.first.compareTo(y.first));
+      if (spans.isEmpty) continue;
+      b.writeln('  $t по интервалам: ${spans.map((x) => 'id ${x.id.length} цифр/${RegExp(r'^\d+$').hasMatch(x.id) ? 'число' : 'текст'}, '
+          '${x.days} дн., неделя ${(mondayOf(x.first).difference(mon).inDays / 7).round()}, ${x.count} об.').join('; ')}');
+    }
+    b.writeln('  итоговые: неудачных проб ${failedProbes.length}, год ${currentYear == null ? 'нет' : 'есть'}');
     final byType = <String, List<DmEntry>>{};
     for (final e in entries.values) {
       byType.putIfAbsent(e.objType, () => []).add(e);
@@ -449,11 +553,11 @@ const _subjectKeys = [
 ];
 const _dateKeys = ['date', 'lesson_date', 'day', 'lesson_day', 'schedule_date', 'event_date', 'date_lesson'];
 const _startKeys = [
-  'time_start', 'start_time', 'begin_time', 'lesson_start', 'time_from', 'start', 'begin', 'start_at', 'begin_at',
+  'start_datetime', 'time_start', 'start_time', 'begin_time', 'lesson_start', 'time_from', 'start', 'begin', 'start_at', 'begin_at',
   'datetime_from', 'datetime_start', 'start_date_time', 'date_from', 'date_start',
 ];
 const _endKeys = [
-  'time_end', 'end_time', 'finish_time', 'lesson_end', 'time_to', 'end', 'finish', 'end_at', 'finish_at', 'datetime_to',
+  'end_datetime', 'time_end', 'end_time', 'finish_time', 'lesson_end', 'time_to', 'end', 'finish', 'end_at', 'finish_at', 'datetime_to',
   'datetime_end', 'end_date_time', 'date_to', 'date_end',
 ];
 const _numberKeys = ['lesson_number', 'number', 'lesson_num', 'num', 'order', 'position', 'lesson_index', 'period_number', 'index'];
@@ -463,18 +567,18 @@ const _hwTextKeys = [
   'value', 'title', 'name', 'comment',
 ];
 const _hwDueKeys = [
-  'date_to', 'deadline', 'due_date', 'dueDate', 'to_date', 'date_end', 'end_date', 'lesson_date', 'date', 'date_from',
+  'plan_ready_date', 'ready_date', 'date_to', 'deadline', 'due_date', 'dueDate', 'to_date', 'date_end', 'end_date', 'lesson_date', 'date', 'date_from',
   'created_at', 'created',
 ];
-const _lessonLinkKeys = ['lesson_id', 'schedule_id', 'schedule_item_id', 'lesson_uuid', 'lessonId'];
+const _lessonLinkKeys = ['ready_lesson_id', 'lesson_id', 'schedule_id', 'schedule_item_id', 'lesson_uuid', 'lessonId'];
 const _markValueKeys = [
-  'value', 'mark_value', 'mark', 'grade', 'grade_value', 'score', 'result', 'mark_name', 'five_point', 'text',
+  'mark_value1', 'mark_value', 'value', 'mark_value', 'mark', 'grade', 'grade_value', 'score', 'result', 'mark_name', 'five_point', 'text',
 ];
 const _markWeightKeys = ['weight', 'mark_weight', 'coefficient', 'coef', 'factor', 'mark_coefficient'];
 const _markDateKeys = ['date', 'mark_date', 'lesson_date', 'date_time', 'datetime', 'created_at', 'create_date', 'created'];
 const _markCommentKeys = [
-  'control_form', 'control_name', 'control_form_name', 'work_type', 'work_type_name', 'type_name', 'lesson_type',
-  'form', 'comment', 'kind', 'type',
+  'work_type_description', 'work_type_name', 'control_form', 'control_name', 'control_form_name', 'work_type',
+  'type_name', 'form', 'kind',
 ];
 const _periodKeys = [
   'period_name', 'period', 'interval_name', 'term_name', 'term', 'study_period', 'period_title', 'attestation_period',
@@ -543,7 +647,9 @@ List<Attachment> attachmentsIn(dynamic v, {int depth = 0, bool includeRoot = fal
         name = Uri.decodeComponent(seg);
       }
       final abs = absMsUrl(url);
-      if (seen.add(abs)) out.add(Attachment(name: name, url: abs));
+      final sz = m['size'] ?? m['file_size'] ?? m['fileSize'];
+      final size = sz is num ? sz.toInt() : int.tryParse('${sz ?? ''}') ?? 0;
+      if (seen.add(abs)) out.add(Attachment(name: name, url: abs, size: size));
     }
     for (final e in m.entries) {
       if (e.value is Map || e.value is List) walk(e.value, d + 1);
@@ -554,25 +660,210 @@ List<Attachment> attachmentsIn(dynamic v, {int depth = 0, bool includeRoot = fal
   return out;
 }
 
+// ───────────────────────── intervals (weeks) ─────────────────────────
+
+class IntervalSpan {
+  IntervalSpan(this.id, this.first, this.last, this.count);
+  final String id;
+  final DateTime first;
+  final DateTime last;
+  final int count;
+  int get days => last.difference(first).inDays + 1;
+}
+
+/// Date of a datamart object, used to learn what an interval covers.
+DateTime? objectDate(String objType, Map<String, dynamic> o) {
+  dynamic v;
+  if (objType == 'student_marks') {
+    v = pick(o, _markDateKeys, depth: 0) ?? pick(o, _startKeys, depth: 0);
+  } else if (objType == 'student_homeworks_materials') {
+    v = pick(o, _hwDueKeys, depth: 0);
+  } else {
+    v = pick(o, _dateKeys, depth: 0) ?? pick(o, _startKeys, depth: 0);
+  }
+  final d = parseLooseDateTime(v);
+  return d == null ? null : dateOnly(d);
+}
+
+/// How the web app numbers week intervals: learned from stored intervals
+/// (id → Monday of the lessons inside). Supports a linear numbering
+/// (id = base + step × weeks, e.g. week counters or epoch seconds) and ids that
+/// are dates (YYYYMMDD). Anything else → null (no extra weeks are asked).
+class WeekIntervalModel {
+  WeekIntervalModel._(this.kind, this.base, this.baseMonday, this.step, this.dayOffset, this.width);
+  final String kind; // 'linear' | 'ymd'
+  final int base;
+  final DateTime baseMonday;
+  final int step;
+  final int dayOffset; // ymd: id date − Monday, days
+  final int width;
+
+  static final _digits = RegExp(r'^\d{1,18}$');
+
+  static WeekIntervalModel? fit(List<IntervalSpan> spans) {
+    final weekly = <String, DateTime>{};
+    for (final s in spans) {
+      if (!_digits.hasMatch(s.id) || s.days > 7) continue;
+      final m = mondayOf(s.first);
+      if (mondayOf(s.last) != m) continue;
+      weekly[s.id] = m;
+    }
+    if (weekly.isEmpty) return null;
+    final ids = weekly.keys.toList()..sort();
+    final width = ids.first.length;
+    if (ids.any((i) => i.length != width)) return null;
+
+    // YYYYMMDD ids.
+    if (width == 8) {
+      int? off;
+      var ok = true;
+      for (final id in ids) {
+        final d = DateTime.tryParse('${id.substring(0, 4)}-${id.substring(4, 6)}-${id.substring(6, 8)}');
+        if (d == null || d.month != int.parse(id.substring(4, 6))) {
+          ok = false;
+          break;
+        }
+        final o = dateOnly(d).difference(weekly[id]!).inDays;
+        if (o < -1 || o > 7 || (off != null && off != o)) {
+          ok = false;
+          break;
+        }
+        off = o;
+      }
+      if (ok && off != null) return WeekIntervalModel._('ymd', 0, weekly[ids.first]!, 0, off, width);
+    }
+
+    final base = int.parse(ids.first);
+    final baseMonday = weekly[ids.first]!;
+    int? step;
+    for (final id in ids.skip(1)) {
+      final weeks = weekly[id]!.difference(baseMonday).inDays ~/ 7;
+      final dn = int.parse(id) - base;
+      if (weeks == 0) {
+        if (dn != 0) return null;
+        continue;
+      }
+      if (dn % weeks != 0) return null;
+      final st = dn ~/ weeks;
+      if (st == 0 || (step != null && step != st)) return null;
+      step = st;
+    }
+    if (step == null) {
+      // A single week: epoch seconds / milliseconds of the Monday are recognisable.
+      final ms = baseMonday.millisecondsSinceEpoch;
+      if ((base - ms ~/ 1000).abs() <= 2 * 86400) return WeekIntervalModel._('linear', base, baseMonday, 604800, 0, width);
+      if ((base - ms).abs() <= 2 * 86400000) return WeekIntervalModel._('linear', base, baseMonday, 604800000, 0, width);
+      return null;
+    }
+    return WeekIntervalModel._('linear', base, baseMonday, step, 0, width);
+  }
+
+  /// Interval id of the week starting [monday].
+  String idFor(DateTime monday) {
+    final m = mondayOf(monday);
+    if (kind == 'ymd') {
+      final d = m.add(Duration(days: dayOffset));
+      return '${d.year.toString().padLeft(4, '0')}${d.month.toString().padLeft(2, '0')}${d.day.toString().padLeft(2, '0')}';
+    }
+    final weeks = (m.difference(baseMonday).inHours / (24 * 7)).round();
+    return '${base + step * weeks}'.padLeft(width, '0');
+  }
+
+  /// No values — for Диагностика.
+  String describe() => kind == 'ymd' ? 'ГГГГММДД (+$dayOffset дн. от пн)' : 'линейная, шаг $step на неделю, $width цифр';
+}
+
+// ───────────────────────── study periods ─────────────────────────
+
+String _periodLabel(Map<String, dynamic> p, int days) {
+  final num = textOf(pick(p, const ['period_num', 'num', 'number'], depth: 0));
+  final desc = textOf(pick(p, const ['period_type_description', 'period_type_descrioption', 'period_name', 'name'], depth: 0));
+  final low = desc.toLowerCase();
+  if (days > 200 || (low.contains('год') && !low.contains('полугод'))) return 'Год';
+  if (RegExp(r'\d').hasMatch(desc)) return desc;
+  String word;
+  if (low.contains('четв')) {
+    word = 'четверть';
+  } else if (low.contains('полуг')) {
+    word = 'полугодие';
+  } else if (low.contains('трим')) {
+    word = 'триместр';
+  } else if (low.contains('семест')) {
+    word = 'семестр';
+  } else if (low.contains('кан')) {
+    word = 'каникулы';
+  } else {
+    word = low.isEmpty ? 'период' : low;
+  }
+  return num.isEmpty ? word : '$num $word';
+}
+
+/// Study periods of the current class (student_classes → periods).
+List<StudyPeriod> parsePeriods(List<Map<String, dynamic>> classes) {
+  final out = <StudyPeriod>[];
+  final seen = <String>{};
+  for (final c in classes) {
+    final list = c['periods'];
+    if (list is! List) continue;
+    for (final raw in list) {
+      if (raw is! Map) continue;
+      final p = Map<String, dynamic>.from(raw);
+      final a = parseLooseDateTime(pick(p, const ['period_start_date', 'start_date', 'date_from'], depth: 0));
+      final b = parseLooseDateTime(pick(p, const ['period_end_date', 'end_date', 'date_to'], depth: 0));
+      if (a == null || b == null) continue;
+      final start = dateOnly(a), end = dateOnly(b);
+      final id = textOf(p['period_id'] ?? p['id']);
+      if (!seen.add('$id|$start|$end')) continue;
+      final days = end.difference(start).inDays + 1;
+      out.add(StudyPeriod(
+        id: id,
+        label: _periodLabel(p, days),
+        start: start,
+        end: end,
+        type: textOf(p['period_type_code'] ?? p['period_type_value']),
+        study: p['period_is_study'] != false,
+      ));
+    }
+  }
+  out.sort((a, b) => a.start.compareTo(b.start) != 0 ? a.start.compareTo(b.start) : b.days.compareTo(a.days));
+  return out;
+}
+
+/// The attestation periods marks are grouped by (most frequent study type shorter than a year).
+List<StudyPeriod> mainPeriods(List<StudyPeriod> all) {
+  final byType = <String, List<StudyPeriod>>{};
+  for (final p in all) {
+    if (!p.study || p.days > 200) continue;
+    byType.putIfAbsent(p.type, () => []).add(p);
+  }
+  if (byType.isEmpty) return const [];
+  final best = byType.values.reduce((a, b) => b.length > a.length ? b : a);
+  return best..sort((a, b) => a.start.compareTo(b.start));
+}
+
+StudyPeriod? periodAt(List<StudyPeriod> periods, DateTime day) {
+  final d = dateOnly(day);
+  for (final p in periods) {
+    if (p.contains(d)) return p;
+  }
+  StudyPeriod? prev;
+  for (final p in periods) {
+    if (!p.start.isAfter(d)) prev = p;
+  }
+  return prev ?? (periods.isEmpty ? null : periods.first);
+}
+
 // ───────────────────────── objects → diary ─────────────────────────
 
 class _LessonRec {
-  _LessonRec(this.id, this.date, this.lesson, this.sortKey);
+  _LessonRec(this.id, this.date, this.lesson, this.start, this.end, this.order);
   final String id;
   final DateTime date;
   Lesson lesson;
-  final String sortKey;
+  final String start; // «08:30» or ''
+  final String end;
+  final int order; // arrival order (the portal sends lessons in day order)
 }
-
-Lesson _copyLesson(Lesson l, {String? homework, List<Attachment>? files, List<Mark>? marks}) => Lesson(
-      number: l.number,
-      time: l.time,
-      subject: l.subject,
-      topic: l.topic,
-      homework: homework ?? l.homework,
-      files: files ?? l.files,
-      marks: marks ?? l.marks,
-    );
 
 String _homeworkText(dynamic v) {
   if (v == null) return '';
@@ -585,30 +876,66 @@ String _homeworkText(dynamic v) {
   return '';
 }
 
+String _markValue(Map<String, dynamic> m) {
+  final v1 = textOf(pick(m, _markValueKeys, depth: 1));
+  final v2 = textOf(m['mark_value2']);
+  if (v1.isEmpty) return v2;
+  return v2.isEmpty || v2 == v1 ? v1 : '$v1/$v2';
+}
+
 Mark? parseMark(Map<String, dynamic> m, {String subject = ''}) {
-  var raw = pick(m, _markValueKeys, depth: 1);
-  final value = textOf(raw);
+  final value = _markValue(m);
   if (value.isEmpty) return null;
   final w = pick(m, _markWeightKeys, depth: 1);
   final weight = w is num ? w.toDouble() : double.tryParse(textOf(w).replaceAll(',', '.')) ?? 1;
   final d = parseLooseDateTime(pick(m, _markDateKeys, depth: 1));
-  final comment = textOf(pick(m, _markCommentKeys, depth: 1));
+  final kind = textOf(pick(m, _markCommentKeys, depth: 1));
+  final note = textOf(m['comment']);
+  final comment = [kind, if (note.isNotEmpty && note != kind) note].where((x) => x.isNotEmpty && x != value).join(' · ');
   final subj = subjectOf(m);
   return Mark(
     value: value,
     weight: weight <= 0 ? 1 : weight,
-    comment: comment == value ? '' : comment,
+    comment: comment,
     subject: subj.isEmpty ? subject : subj,
     date: d == null ? null : dateOnly(d),
     kind: '',
+    periodId: textOf(m['period_id']),
   );
 }
 
+String _teacherOf(Map<String, dynamic> o) {
+  final last = textOf(o['lastname'] ?? o['last_name'] ?? o['teacher_last_name']);
+  final first = textOf(o['firstname'] ?? o['first_name'] ?? o['teacher_first_name']);
+  final middle = textOf(o['patronymic'] ?? o['middle_name'] ?? o['teacher_middle_name']);
+  if (last.isEmpty) return textOf(o['teacher_name'] ?? o['teacher_fio'] ?? o['teacher']);
+  final ini = [first, middle].where((x) => x.isNotEmpty).map((x) => '${x.substring(0, 1)}.').join(' ');
+  return ini.isEmpty ? last : '$last $ini';
+}
+
+String _absenceOf(Map<String, dynamic> o) {
+  if (o['skipping_id'] == null && o['skip_date'] == null) return '';
+  final t = textOf(o['skipping_description'] ?? o['type_description'] ?? o['type_value']);
+  return t.isEmpty ? 'Пропуск' : t;
+}
+
+/// Stable identity of a datamart object (the same lesson comes in several intervals).
+String _identity(Map<String, dynamic> o, List<String> keys) {
+  for (final k in keys) {
+    final v = o[k];
+    if (v != null && textOf(v).isNotEmpty) return '$k:${textOf(v)}';
+  }
+  final copy = Map<String, dynamic>.from(o)..remove('obj_hash');
+  return 'json:${jsonEncode(copy)}';
+}
+
 class DiaryData {
-  DiaryData(this.days, this.subjects, this.finals);
+  DiaryData(this.days, this.subjects, this.finals, {this.periods = const [], this.timesFromBells = false});
   final List<Day> days;
   final List<SubjectMarks> subjects;
   final FinalsTable? finals;
+  final List<StudyPeriod> periods; // main attestation periods (четверти)
+  final bool timesFromBells;
 
   Map<String, Week> weeks(DateTime fetchedAt) {
     final out = <String, Week>{};
@@ -630,7 +957,7 @@ String weekKey(DateTime monday) =>
 const _weekdaysFull = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье'];
 
 /// Builds the diary from raw objects of the store.
-DiaryData buildDiary(DatamartStore store) {
+DiaryData buildDiary(DatamartStore store, {List<String> bells = const [], DateTime? now}) {
   return buildDiaryFrom(
     lessons: store.objectsOf('student_lessons'),
     homeworks: store.objectsOf('student_homeworks_materials'),
@@ -640,7 +967,17 @@ DiaryData buildDiary(DatamartStore store) {
         for (final o in e.objects.values) {...o, '#interval': e.intervalId},
     ],
     ymarks: store.objectsOf('student_ymarks'),
+    classes: store.objectsOf('student_classes'),
+    bells: bells,
+    now: now,
   );
+}
+
+/// «08:30–09:15» lines from the bell schedule setting (index = lesson number − 1).
+String bellFor(List<String> bells, String number) {
+  final n = int.tryParse(number);
+  if (n == null || n < 1 || n > bells.length) return '';
+  return bells[n - 1].trim();
 }
 
 DiaryData buildDiaryFrom({
@@ -649,12 +986,18 @@ DiaryData buildDiaryFrom({
   List<Map<String, dynamic>> marks = const [],
   List<Map<String, dynamic>> pmarks = const [],
   List<Map<String, dynamic>> ymarks = const [],
+  List<Map<String, dynamic>> classes = const [],
+  List<String> bells = const [],
+  DateTime? now,
 }) {
   final recs = <_LessonRec>[];
   final byId = <String, _LessonRec>{};
+  final seenLessons = <String>{};
+  var order = 0;
 
-  // Lessons (schedule).
+  // Lessons (schedule). The same lesson arrives in several overlapping intervals → dedupe.
   for (final o in lessons) {
+    if (!seenLessons.add(_identity(o, const ['id', 'obj_id', 'lesson_id', 'uuid']))) continue;
     final startRaw = pick(o, _startKeys, depth: 1);
     final endRaw = pick(o, _endKeys, depth: 1);
     var date = _dateFrom(o, _dateKeys);
@@ -664,29 +1007,66 @@ DiaryData buildDiaryFrom({
     }
     if (date == null) continue;
     final s = parseLooseTime(startRaw), e = parseLooseTime(endRaw);
-    final time = s.isEmpty ? '' : (e.isEmpty ? s : '$s–$e');
     final number = textOf(pick(o, _numberKeys, depth: 0));
     final subject = subjectOf(o);
     final inlineHw = pick(o, const ['homework', 'home_work', 'hometask', 'homeworks', 'home_task'], depth: 0);
     final lesson = Lesson(
       number: RegExp(r'^\d{1,2}$').hasMatch(number) ? number : '',
-      time: time,
       subject: subject.isEmpty ? 'Урок' : subject,
       topic: htmlToText(textOf(pick(o, _topicKeys, depth: 1))),
       homework: _homeworkText(inlineHw),
       files: attachmentsIn(inlineHw),
+      room: textOf(pick(o, const ['room', 'room_name', 'classroom', 'cabinet', 'auditorium'], depth: 0)),
+      teacher: _teacherOf(o),
+      absence: _absenceOf(o),
     );
-    final id = textOf(o['obj_id'] ?? o['id'] ?? o['lesson_id'] ?? o['uuid']);
-    final sortKey = '${lesson.number.padLeft(2, '0')}|${s.isEmpty ? '99:99' : s}';
-    final r = _LessonRec(id, date, lesson, sortKey);
+    final r = _LessonRec(textOf(o['id'] ?? o['obj_id']), date, lesson, s, e, order++);
     recs.add(r);
     for (final k in [o['obj_id'], o['id'], o['lesson_id'], o['uuid'], o['schedule_id']]) {
-      if (k != null && textOf(k).isNotEmpty) byId[textOf(k)] = r;
+      if (k != null && textOf(k).isNotEmpty) byId.putIfAbsent(textOf(k), () => r);
     }
   }
 
-  // Homework (+ materials/files).
+  // Times: the portal sends a placeholder (the same start for every lesson of a day)
+  // when the school did not fill its bell schedule → show lesson numbers only.
+  final byDay = <DateTime, List<_LessonRec>>{};
+  for (final r in recs) {
+    byDay.putIfAbsent(r.date, () => []).add(r);
+  }
+  final allStarts = recs.map((r) => r.start).where((x) => x.isNotEmpty).toSet();
+  final globalFake = recs.length >= 3 && allStarts.length == 1;
+  var usedBells = false;
+  for (final list in byDay.values) {
+    final starts = list.map((r) => r.start).toSet();
+    final fake = globalFake || (list.length >= 2 && starts.length == 1);
+    final hasNumbers = list.every((r) => r.lesson.number.isNotEmpty);
+    list.sort((a, b) {
+      if (hasNumbers) {
+        final c = int.parse(a.lesson.number).compareTo(int.parse(b.lesson.number));
+        if (c != 0) return c;
+      } else if (!fake) {
+        final c = (a.start.isEmpty ? '99:99' : a.start).compareTo(b.start.isEmpty ? '99:99' : b.start);
+        if (c != 0) return c;
+      }
+      return a.order.compareTo(b.order);
+    });
+    for (var i = 0; i < list.length; i++) {
+      final r = list[i];
+      final number = r.lesson.number.isNotEmpty ? r.lesson.number : '${i + 1}';
+      var time = '';
+      if (!fake && r.start.isNotEmpty) time = r.end.isEmpty ? r.start : '${r.start}–${r.end}';
+      if (time.isEmpty) {
+        time = bellFor(bells, number);
+        if (time.isNotEmpty) usedBells = true;
+      }
+      r.lesson = r.lesson.copyWith(number: number, time: time);
+    }
+  }
+
+  // Homework (+ materials). Shown on the lesson it is due (ready_lesson_id / plan_ready_date).
+  final seenHw = <String>{};
   for (final o in homeworks) {
+    if (!seenHw.add(_identity(o, const ['id', 'obj_id', 'homework_id']))) continue;
     final subject = subjectOf(o);
     var text = '';
     for (final k in _hwTextKeys) {
@@ -701,40 +1081,43 @@ DiaryData buildDiaryFrom({
     if (files.any((f) => f.name == text)) text = '';
     if (text.isEmpty && files.isEmpty) continue;
     _LessonRec? target;
-    final link = pick(o, _lessonLinkKeys, depth: 1);
+    final link = pick(o, _lessonLinkKeys, depth: 0);
     if (link != null) target = byId[textOf(link)];
     final date = _dateFrom(o, _hwDueKeys) ?? target?.date;
+    if (target != null && date != null && target.date != date) target = null;
     if (target == null && date != null) {
       final same = recs.where((r) => r.date == date && normSubject(r.lesson.subject) == normSubject(subject)).toList();
       if (same.isNotEmpty) target = same.firstWhere((r) => !r.lesson.hasHomework, orElse: () => same.first);
     }
     if (target != null) {
       final l = target.lesson;
-      final hw = l.homework.isEmpty ? text : (l.homework.contains(text) ? l.homework : '${l.homework}\n$text');
+      final hw = l.homework.isEmpty ? text : (text.isEmpty || l.homework.contains(text) ? l.homework : '${l.homework}\n$text');
       final allFiles = [...l.files, ...files.where((f) => !l.files.any((x) => x.url == f.url))];
-      target.lesson = _copyLesson(l, homework: hw, files: allFiles);
+      target.lesson = l.copyWith(homework: hw, files: allFiles);
     } else if (date != null) {
-      final r = _LessonRec('', date, Lesson(subject: subject.isEmpty ? 'Задание' : subject, homework: text, files: files), '99|99:99');
-      recs.add(r);
+      recs.add(_LessonRec('', date,
+          Lesson(subject: subject.isEmpty ? 'Задание' : subject, homework: text, files: files, isLesson: false), '', '', order++));
     }
   }
 
-  // Marks: attached to the lesson of the same day/subject, and grouped by subject.
+  // Marks: on the lesson (lesson_id, else same day + subject) and grouped by subject.
   final bySubject = <String, List<Mark>>{};
   final subjectNames = <String, String>{};
+  final seenMarks = <String>{};
   for (final o in marks) {
+    if (!seenMarks.add(_identity(o, const ['id', 'obj_id', 'marks_id']))) continue;
     final m = parseMark(o);
     if (m == null) continue;
     final key = normSubject(m.subject);
     subjectNames.putIfAbsent(key, () => m.subject.isEmpty ? 'Без предмета' : m.subject);
     bySubject.putIfAbsent(key, () => []).add(m);
     _LessonRec? target;
-    final link = pick(o, _lessonLinkKeys, depth: 1);
+    final link = o['lesson_id'] ?? pick(o, _lessonLinkKeys, depth: 0);
     if (link != null) target = byId[textOf(link)];
     if (target == null && m.date != null) {
-      target = recs.where((r) => r.date == m.date && normSubject(r.lesson.subject) == key).firstOrNull;
+      target = recs.where((r) => r.date == m.date && normSubject(r.lesson.subject) == key && r.lesson.isLesson).firstOrNull;
     }
-    if (target != null) target.lesson = _copyLesson(target.lesson, marks: [...target.lesson.marks, m]);
+    if (target != null) target.lesson = target.lesson.copyWith(marks: [...target.lesson.marks, m]);
   }
   final subjects = bySubject.entries.map((e) {
     final list = e.value..sort((a, b) => (a.date ?? DateTime(0)).compareTo(b.date ?? DateTime(0)));
@@ -748,7 +1131,12 @@ DiaryData buildDiaryFrom({
     byDate.putIfAbsent(r.date, () => []).add(r);
   }
   final days = byDate.entries.map((e) {
-    final list = e.value..sort((a, b) => a.sortKey.compareTo(b.sortKey));
+    final list = e.value
+      ..sort((a, b) {
+        if (a.lesson.isLesson != b.lesson.isLesson) return a.lesson.isLesson ? -1 : 1;
+        final na = int.tryParse(a.lesson.number) ?? 99, nb = int.tryParse(b.lesson.number) ?? 99;
+        return na != nb ? na.compareTo(nb) : a.order.compareTo(b.order);
+      });
     final d = e.key;
     return Day(
       date: d,
@@ -758,7 +1146,11 @@ DiaryData buildDiaryFrom({
   }).toList()
     ..sort((a, b) => a.date.compareTo(b.date));
 
-  return DiaryData(days, subjects, buildFinals(pmarks: pmarks, ymarks: ymarks));
+  final allPeriods = parsePeriods(classes);
+  final periods = mainPeriods(allPeriods);
+  final official = buildFinals(pmarks: pmarks, ymarks: ymarks, periods: allPeriods);
+  final finals = official ?? buildForecast(subjects, periods, now: now);
+  return DiaryData(days, subjects, finals, periods: periods, timesFromBells: usedBells);
 }
 
 int _periodOrder(String label) {
@@ -771,7 +1163,11 @@ int _periodOrder(String label) {
   return 50;
 }
 
-FinalsTable? buildFinals({List<Map<String, dynamic>> pmarks = const [], List<Map<String, dynamic>> ymarks = const []}) {
+FinalsTable? buildFinals({
+  List<Map<String, dynamic>> pmarks = const [],
+  List<Map<String, dynamic>> ymarks = const [],
+  List<StudyPeriod> periods = const [],
+}) {
   final rows = <String, Map<String, String>>{};
   final names = <String, String>{};
   final headers = <String>[];
@@ -782,12 +1178,16 @@ FinalsTable? buildFinals({List<Map<String, dynamic>> pmarks = const [], List<Map
     if (!headers.contains(period)) headers.add(period);
   }
 
+  final byId = {for (final p in periods) if (p.id.isNotEmpty) p.id: p.label};
   final intervalLabels = <String, String>{};
   for (final o in pmarks) {
     final m = parseMark(o);
     if (m == null) continue;
-    var period = textOf(pick(o, _periodKeys, depth: 1));
-    if (period.isEmpty || RegExp(r'^\d{4,}$').hasMatch(period)) {
+    var period = byId[m.periodId] ?? textOf(pick(o, _periodKeys, depth: 1));
+    if (period.isEmpty || RegExp(r'^\d{4,}$').hasMatch(period) || byId.containsKey(period)) {
+      period = byId[period] ?? '';
+    }
+    if (period.isEmpty) {
       final iid = textOf(o['#interval']);
       period = intervalLabels.putIfAbsent(iid, () => 'Период ${intervalLabels.length + 1}');
     }
@@ -808,4 +1208,51 @@ FinalsTable? buildFinals({List<Map<String, dynamic>> pmarks = const [], List<Map
     rows: [for (final k in keys) FinalsRow(names[k]!, [for (final h in allHeaders) rows[k]![h] ?? ''])],
     fetchedAt: DateTime.now(),
   );
+}
+
+/// Weighted average of marks (null when none is numeric).
+double? weightedAverage(Iterable<Mark> marks) {
+  double sum = 0, w = 0;
+  for (final m in marks) {
+    final n = m.numeric;
+    if (n == null) continue;
+    sum += n * m.weight;
+    w += m.weight;
+  }
+  return w == 0 ? null : sum / w;
+}
+
+/// Mark a weighted average rounds to (x.5 rounds up).
+String roundedMark(double avg) => (avg + 0.5 + 1e-9).floor().clamp(1, 5).toString();
+
+/// Marks of [period]: by period id when the marks carry one, else by date.
+List<Mark> marksInPeriod(List<Mark> marks, StudyPeriod period) => marks
+    .where((m) => m.periodId.isNotEmpty && period.id.isNotEmpty
+        ? m.periodId == period.id
+        : (m.date != null && period.contains(m.date!)))
+    .toList();
+
+/// «Прогноз» like the official app when the portal has no final marks yet:
+/// rounded weighted average per started period and for the year.
+FinalsTable? buildForecast(List<SubjectMarks> subjects, List<StudyPeriod> periods, {DateTime? now}) {
+  if (subjects.isEmpty) return null;
+  final today = dateOnly(now ?? DateTime.now());
+  final started = periods.where((p) => !p.start.isAfter(today)).toList();
+  final headers = [for (final p in started) p.label, 'Год'];
+  final rows = <FinalsRow>[];
+  for (final s in subjects) {
+    final values = <String>[], notes = <String>[];
+    for (final p in started) {
+      final a = weightedAverage(marksInPeriod(s.marks, p));
+      values.add(a == null ? '' : roundedMark(a));
+      notes.add(a == null ? '' : a.toStringAsFixed(2));
+    }
+    final y = weightedAverage(s.marks);
+    values.add(y == null ? '' : roundedMark(y));
+    notes.add(y == null ? '' : y.toStringAsFixed(2));
+    if (values.every((v) => v.isEmpty)) continue;
+    rows.add(FinalsRow(s.subject, values, notes));
+  }
+  if (rows.isEmpty) return null;
+  return FinalsTable(headers: headers, rows: rows, fetchedAt: DateTime.now(), forecast: true);
 }

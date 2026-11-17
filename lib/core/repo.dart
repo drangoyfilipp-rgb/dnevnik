@@ -25,7 +25,23 @@ const _skipHeaders = {
 class Repo extends ChangeNotifier {
   Repo(this.settings) {
     Bridge.onCapture = onWebCapture;
+    _bells = List.of(settings.bells);
+    settings.addListener(() {
+      if (settings.bells.join('|') != _bells.join('|')) {
+        _bells = List.of(settings.bells);
+        _derive();
+        notifyListeners();
+      }
+    });
   }
+
+  List<String> _bells = const [];
+
+  /// Main attestation periods (четверти) of the current class, sorted.
+  List<StudyPeriod> periods = const [];
+
+  /// Lesson times come from the user's bell schedule (the portal has none).
+  bool timesFromBells = false;
 
   final AppSettings settings;
   final MsClient client = MsClient();
@@ -108,7 +124,9 @@ class Repo extends ChangeNotifier {
 
   void _derive() {
     try {
-      final data = buildDiary(store);
+      final data = buildDiary(store, bells: settings.bells);
+      periods = data.periods;
+      timesFromBells = data.timesFromBells;
       weeks = data.weeks(lastSync ?? store.lastUpdated ?? DateTime.now());
       grades = data.subjects.isEmpty
           ? null
@@ -117,6 +135,12 @@ class Repo extends ChangeNotifier {
     } catch (e, st) {
       Diagnostics.instance.error('разбор данных', '$e\n${st.toString().split('\n').take(4).join('\n')}');
     }
+  }
+
+  /// Re-derives the diary from [store] (tests, settings changes).
+  void reloadFromStore() {
+    _derive();
+    notifyListeners();
   }
 
   /// Saves the portal session copied from the login WebView.
@@ -145,6 +169,10 @@ class Repo extends ChangeNotifier {
     });
     if (changed) unawaited(_persistSession());
     if (c.path.contains('/auth/student') && c.status == 200) store.learnStudent(c.responseJson);
+    if (c.path.contains('/current_year') && c.status == 200) {
+      final y = c.responseJson;
+      if (y is Map && y['current_year'] != null) store.currentYear = '${y['current_year']}';
+    }
     if (c.isDatamart) {
       store.learnRequest(c.requestJson);
       final j = c.responseJson;
@@ -285,6 +313,83 @@ class Repo extends ChangeNotifier {
     lastSync = DateTime.now();
     sessionExpired = false;
     await _persistSession();
+    await _extras();
+  }
+
+  /// Best effort after a successful replay: weeks of the current period that the web app
+  /// never asked (for marks of the whole четверть, next week's schedule) and final marks.
+  Future<void> _extras() async {
+    try {
+      final now = DateTime.now();
+      final p = periodAt(periods, now);
+      final mondays = <DateTime>[];
+      var m = mondayOf(p != null && p.contains(now) ? p.start : now.subtract(const Duration(days: 42)));
+      final last = mondayOf(now).add(const Duration(days: 7));
+      while (!m.isAfter(last)) {
+        mondays.add(m);
+        m = m.add(const Duration(days: 7));
+      }
+      await _fetchWeeks(mondays, max: 12);
+    } catch (e) {
+      if (isOfflineError(e)) rethrow;
+      Diagnostics.instance.add('доп. недели: $e');
+    }
+    for (final item in store.finalProbes()) {
+      final k = '${item['obj_type']}|${item['interval_id']}';
+      try {
+        final r = await client.json('POST', kMsDatamartPath, body: [item]);
+        final a = store.applyResponse(r.json, ourRequest: true);
+        if (a.items == 0 || a.errors.isNotEmpty) {
+          store.failedProbes[k] = DateTime.now().toIso8601String();
+        } else {
+          Diagnostics.instance.add('Итоговые: ${item['obj_type']} отвечает (${a.objects} об.)');
+        }
+      } on HttpFailure catch (e) {
+        store.failedProbes[k] = DateTime.now().toIso8601String();
+        Diagnostics.instance.add('Итоговые: ${item['obj_type']} → ${e.status}');
+      } on NotJson {
+        store.failedProbes[k] = DateTime.now().toIso8601String();
+      } catch (e) {
+        if (isOfflineError(e)) rethrow;
+        Diagnostics.instance.add('Итоговые: $e');
+        break;
+      }
+    }
+  }
+
+  /// Asks lessons/homework/marks for the weeks starting [mondays] that are not stored yet,
+  /// using the web app's week numbering (learned). Returns true when something was asked.
+  Future<bool> _fetchWeeks(List<DateTime> mondays, {int max = 6}) async {
+    final model = store.weekModel;
+    final sid = store.requestStudentId;
+    if (model == null || sid == null) return false;
+    final items = <Map<String, dynamic>>[];
+    for (final mon in mondays) {
+      final iid = model.idFor(mon);
+      for (final t in kWeeklyObjTypes) {
+        if (store.entries.containsKey(DatamartStore.keyOf(t, sid, iid))) continue;
+        if (store.failedProbes.containsKey('$t|$iid')) continue;
+        items.add({'interval_id': iid, 'obj_type': t, 'student_id': sid, 'hash': null});
+      }
+      if (items.length >= max * kWeeklyObjTypes.length) break;
+    }
+    if (items.isEmpty) return false;
+    for (var i = 0; i < items.length; i += 9) {
+      final chunk = items.sublist(i, i + 9 > items.length ? items.length : i + 9);
+      try {
+        final r = await client.json('POST', kMsDatamartPath, body: chunk);
+        store.applyResponse(r.json, ourRequest: true);
+      } on HttpFailure catch (e) {
+        final when = DateTime.now().toIso8601String();
+        for (final it in chunk) {
+          store.failedProbes['${it['obj_type']}|${it['interval_id']}'] = when;
+        }
+        Diagnostics.instance.add('Недели по модели (${model.describe()}) → ${e.status}');
+        break;
+      }
+    }
+    _scheduleSave();
+    return true;
   }
 
   Future<HarvestResult> _harvest() async {
@@ -351,33 +456,13 @@ class Repo extends ChangeNotifier {
     return weekAt(delta);
   }
 
-  /// When the web app asks lessons per week (interval id with dates), ask for another week too.
+  /// A week the web app never asked: ask it with the learned week numbering.
   Future<void> _fetchShiftedWeek(int delta) async {
     final target = mondayOf(DateTime.now()).add(Duration(days: 7 * delta));
-    final items = <Map<String, dynamic>>[];
-    for (final r in store.requests) {
-      for (final i in r) {
-        final t = '${i['obj_type']}';
-        if (t != 'student_lessons' && t != 'student_homeworks_materials') continue;
-        final iid = '${i['interval_id'] ?? ''}';
-        final m = RegExp(r'(\d{4})-(\d{2})-(\d{2})').firstMatch(iid);
-        if (m == null) continue;
-        final first = DateTime(int.parse(m.group(1)!), int.parse(m.group(2)!), int.parse(m.group(3)!));
-        final shift = target.difference(mondayOf(first)).inDays;
-        final shifted = shiftIntervalId(iid, shift);
-        if (shifted == null || items.any((x) => x['obj_type'] == t && x['interval_id'] == shifted)) continue;
-        final sid = '${i['student_id'] ?? ''}';
-        items.add({...i, 'interval_id': shifted, 'hash': store.entries[DatamartStore.keyOf(t, sid, shifted)]?.hash});
-      }
-    }
-    if (items.isEmpty) return;
     busy = true;
     notifyListeners();
     try {
-      final r = await client.json('POST', kMsDatamartPath, body: items);
-      store.applyResponse(r.json, ourRequest: true);
-      _derive();
-      _scheduleSave();
+      if (await _fetchWeeks([target])) _derive();
     } catch (e) {
       if (isOfflineError(e)) {
         offline = true;
@@ -446,5 +531,9 @@ class Repo extends ChangeNotifier {
       'cookies=${client.cookies.length}, доп. заголовки=${client.headers.keys.join('/')}, '
       'офлайн=${offline ? 'да' : 'нет'}, сессия истекла=${sessionExpired ? 'да' : 'нет'}, '
       'обновлено=${lastSync == null ? 'никогда' : ddmmhhmm(lastSync!)}, недель=${weeks.length}, '
-      'предметов с оценками=${grades?.subjects.length ?? 0}, итоговых строк=${finals?.rows.length ?? 0}';
+      'предметов с оценками=${grades?.subjects.length ?? 0}, оценок=${grades?.subjects.fold<int>(0, (a, s) => a + s.marks.length) ?? 0}, '
+      'итоговых строк=${finals?.rows.length ?? 0}${finals?.forecast == true ? ' (прогноз)' : ''}, четвертей=${periods.length}, '
+      'уроков=${allDays().fold<int>(0, (a, d) => a + d.lessons.where((l) => l.isLesson).length)}, '
+      'с ДЗ=${allDays().fold<int>(0, (a, d) => a + d.lessons.where((l) => l.hasHomework).length)}, '
+      'время уроков=${timesFromBells ? 'из звонков' : 'с портала/нет'}';
 }
