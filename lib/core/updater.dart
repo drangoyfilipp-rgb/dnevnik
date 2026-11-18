@@ -59,14 +59,29 @@ class Updater {
   Future<UpdateInfo?> check({bool manual = false}) async {
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
     try {
-      final req = await client.getUrl(Uri.parse(kLatestApi));
-      req.headers.set('Accept', 'application/vnd.github+json');
-      req.headers.set('User-Agent', 'dnevnik-app');
-      final res = await req.close().timeout(const Duration(seconds: 20));
-      final body = await res.transform(utf8.decoder).join();
-      if (res.statusCode != 200) throw HttpException('GitHub ответил ${res.statusCode}');
+      Future<(int, String)> get(String url) async {
+        final req = await client.getUrl(Uri.parse(url));
+        req.headers.set('Accept', 'application/vnd.github+json');
+        req.headers.set('User-Agent', 'dnevnik-app');
+        final res = await req.close().timeout(const Duration(seconds: 20));
+        return (res.statusCode, await res.transform(utf8.decoder).join());
+      }
+
+      var (code, body) = await get(kLatestApi);
+      Map<String, dynamic>? j;
+      if (code == 200) {
+        j = jsonDecode(body) as Map<String, dynamic>;
+      } else if (code == 404) {
+        // /latest skips releases marked «pre-release»: take the newest build-N from the list.
+        (code, body) = await get('https://api.github.com/repos/$kRepo/releases?per_page=20');
+        if (code == 200) {
+          final list = (jsonDecode(body) as List).map((e) => Map<String, dynamic>.from(e as Map)).where((r) => r['draft'] != true && buildFromTag(r['tag_name'] as String? ?? '') != null).toList()
+            ..sort((a, b) => buildFromTag(b['tag_name'] as String)!.compareTo(buildFromTag(a['tag_name'] as String)!));
+          if (list.isNotEmpty) j = list.first;
+        }
+      }
+      if (j == null) throw HttpException('GitHub ответил $code');
       await settings.update((s) => s.lastUpdateCheck = DateTime.now());
-      final j = jsonDecode(body) as Map<String, dynamic>;
       final build = buildFromTag(j['tag_name'] as String? ?? '');
       if (build == null) return null;
       final current = await currentBuild();

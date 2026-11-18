@@ -108,6 +108,7 @@ class _LoginWebViewState extends State<LoginWebView> {
     if ((cookies['acc_t'] ?? '').isEmpty) return;
     _signedIn = true;
     await Services.I.repo.saveSession(cookies, await Bridge.userAgent(c));
+    await CookieKeeper.persist();
     if (!mounted) return;
     setState(() {});
     if (!widget.browse) {
@@ -124,6 +125,7 @@ class _LoginWebViewState extends State<LoginWebView> {
     final c = _c;
     if ((cookies['acc_t'] ?? '').isNotEmpty) {
       await Services.I.repo.saveSession(cookies, c == null ? null : await Bridge.userAgent(c));
+      await CookieKeeper.persist();
     }
     if (!mounted) return;
     if (widget.browse) {

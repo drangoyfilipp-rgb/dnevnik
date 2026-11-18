@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
+import '../core/bridge.dart';
 import '../core/settings.dart';
 import '../core/updater.dart';
 import '../services.dart';
@@ -71,6 +72,7 @@ class MoreTab extends StatelessWidget {
           );
           if (ok == true) {
             await CookieManager.instance().deleteAllCookies();
+            await CookieKeeper.clear();
             await repo.logout();
           }
         },

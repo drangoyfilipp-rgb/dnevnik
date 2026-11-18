@@ -9,6 +9,7 @@ import 'dart:collection';
 import 'dart:convert';
 
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import 'diagnostics.dart';
 import 'myschool.dart';
@@ -224,6 +225,105 @@ class HarvestResult {
   String toString() => 'вход=${signedIn ? 'да' : 'нет'}, стена входа=${loginWall ? 'да' : 'нет'}, ответов datamart=$datamart';
 }
 
+/// Keeps the Госуслуги/ESIA login alive across app restarts.
+/// Android drops session cookies (no expiry) when the process dies, which logged the
+/// user out every time. After each successful sign-in we re-set every portal/ESIA
+/// cookie with an explicit expiry (so the WebView store keeps it on disk) and keep a
+/// copy in secure storage to put back if the store lost it. No password is stored.
+class CookieKeeper {
+  static const _store = FlutterSecureStorage();
+  static const _key = 'wv_cookies_v1';
+  static const _ttl = Duration(days: 30);
+  static const _sources = <String, String>{
+    // url to read from → url to write back to
+    'https://www.gosuslugi.ru/': 'https://www.gosuslugi.ru/',
+    'https://www.gosuslugi.ru/school/feed': 'https://www.gosuslugi.ru/',
+    'https://esia.gosuslugi.ru/': 'https://esia.gosuslugi.ru/',
+    'https://esia.gosuslugi.ru/login/': 'https://esia.gosuslugi.ru/',
+    'https://esia.gosuslugi.ru/aas/oauth2/': 'https://esia.gosuslugi.ru/',
+  };
+
+  static Future<Map<String, Map<String, String>>> _read() async {
+    final out = <String, Map<String, String>>{};
+    for (final e in _sources.entries) {
+      try {
+        final list = await CookieManager.instance().getCookies(url: WebUri(e.key));
+        final m = out.putIfAbsent(e.value, () => <String, String>{});
+        for (final c in list) {
+          final v = '${c.value ?? ''}';
+          if (c.name.isNotEmpty && v.isNotEmpty) m[c.name] = v;
+        }
+      } catch (err) {
+        Diagnostics.instance.error('cookies', err);
+      }
+    }
+    return out;
+  }
+
+  static Future<void> _write(Map<String, Map<String, String>> all) async {
+    final exp = DateTime.now().add(_ttl).millisecondsSinceEpoch;
+    var n = 0;
+    for (final e in all.entries) {
+      for (final c in e.value.entries) {
+        try {
+          await CookieManager.instance().setCookie(
+            url: WebUri(e.key),
+            name: c.key,
+            value: c.value,
+            path: '/',
+            expiresDate: exp,
+            isSecure: true,
+          );
+          n++;
+        } catch (_) {}
+      }
+    }
+    Diagnostics.instance.add('Куки входа закреплены: $n');
+  }
+
+  /// Call right after a successful sign-in / silent refresh.
+  static Future<void> persist() async {
+    final all = await _read();
+    if (all.values.every((m) => m.isEmpty)) return;
+    await _write(all);
+    try {
+      await _store.write(key: _key, value: jsonEncode(all));
+    } catch (_) {}
+  }
+
+  /// Puts the saved cookies back when the WebView store lost them.
+  static Future<void> restore() async {
+    try {
+      final now = await _read();
+      final esiaNow = now['https://esia.gosuslugi.ru/'] ?? const {};
+      final wwwNow = now['https://www.gosuslugi.ru/'] ?? const {};
+      if (esiaNow.isNotEmpty && wwwNow.isNotEmpty) return;
+      final raw = await _store.read(key: _key);
+      if (raw == null) return;
+      final saved = (jsonDecode(raw) as Map).map((k, v) =>
+          MapEntry(k as String, (v as Map).map((a, b) => MapEntry(a as String, b as String))));
+      final missing = <String, Map<String, String>>{};
+      saved.forEach((url, m) {
+        final have = now[url] ?? const {};
+        final add = {for (final c in m.entries) if (!have.containsKey(c.key)) c.key: c.value};
+        if (add.isNotEmpty) missing[url] = add;
+      });
+      if (missing.isNotEmpty) {
+        await _write(missing);
+        Diagnostics.instance.add('Куки входа восстановлены');
+      }
+    } catch (e) {
+      Diagnostics.instance.error('восстановление куки', e);
+    }
+  }
+
+  static Future<void> clear() async {
+    try {
+      await _store.delete(key: _key);
+    } catch (_) {}
+  }
+}
+
 /// Opens www.gosuslugi.ru/school/feed in a hidden WebView (same cookie store as the
 /// login screen): refreshes acc_t through ESIA SSO when possible and lets the web app
 /// load its data, which the bridge captures.
@@ -264,6 +364,7 @@ Future<HarvestResult> runHeadlessHarvest({Duration timeout = const Duration(seco
     },
   );
   final sw = Stopwatch()..start();
+  await CookieKeeper.restore();
   try {
     await hw.run();
     while (sw.elapsed < timeout) {
@@ -285,6 +386,7 @@ Future<HarvestResult> runHeadlessHarvest({Duration timeout = const Duration(seco
     final u = current;
     r.cookies = await Bridge.portalCookies();
     r.signedIn = u != null && Bridge.isSchoolPage(u) && (r.cookies['acc_t'] ?? '').isNotEmpty && !r.loginWall;
+    if (r.signedIn) await CookieKeeper.persist();
     final c = ctl;
     if (c != null) r.userAgent = await Bridge.userAgent(c);
   } catch (e) {
